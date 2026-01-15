@@ -228,27 +228,22 @@ def find_max_daily_volume(num_cells, cell_volume, daily_equipment_capacity,
 
 def optimize_cell_configuration(daily_volume_cy, daily_equipment_capacity,
                                 phase_params, weekend_params,
-                                max_loading_days=14, min_cell_volume=100, 
-                                max_cell_volume=5000, step_size=50):
+                                min_cell_volume=100, max_cell_volume=5000, 
+                                step_size=100):
     """Find optimal cell configurations prioritized by:
     1. Zero idle days (never turn away work)
     2. Fewest cells (minimize capital cost)
     3. Smallest cell size (if tied on cells)
     
     Runs simulation to determine actual idle days for each configuration.
+    Only returns configurations that can handle the planned daily volume.
+    Limited to top 10 results.
     """
     
     results = []
     
     # Test different cell sizes
     for cell_volume in range(min_cell_volume, max_cell_volume + 1, step_size):
-        
-        # Calculate loading days based on incoming volume (not equipment capacity)
-        load_days = cell_volume / daily_volume_cy
-        
-        # Skip if loading takes too long
-        if load_days > max_loading_days:
-            continue
         
         # Calculate cycle time
         cycle_info = calculate_total_cycle_time(
@@ -328,9 +323,10 @@ def optimize_cell_configuration(daily_volume_cy, daily_equipment_capacity,
     if not results:
         return None
     
-    # Sort by score (lower is better)
+    # Sort by score (lower is better) and limit to top 10
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('score').reset_index(drop=True)
+    results_df = results_df.head(10)
     
     return results_df
 
@@ -847,21 +843,13 @@ def main():
         
         # Optimization Parameters
         st.subheader("Optimization Constraints")
-        max_loading_days = st.number_input(
-            "Max Loading Time (calendar days)",
-            min_value=5,
-            max_value=30,
-            value=14,
-            step=1,
-            help="Maximum acceptable time to fill a cell"
-        )
         
         min_cell_size = st.number_input(
             "Min Cell Size (CY)",
-            min_value=50,
+            min_value=100,
             max_value=5000,
             value=900,
-            step=50,
+            step=100,
             help="Minimum cell size to consider"
         )
         
@@ -906,10 +894,9 @@ def main():
                 daily_equipment_capacity,
                 phase_params,
                 weekend_params,
-                max_loading_days=max_loading_days,
                 min_cell_volume=min_cell_size,
                 max_cell_volume=max_cell_size,
-                step_size=50
+                step_size=100
             )
             
             # Store in session state
