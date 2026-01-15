@@ -285,13 +285,14 @@ def optimize_cell_configuration(daily_volume_cy, daily_equipment_capacity,
                 phase_params, weekend_params
             )
             
+            # Skip configurations that can't handle the planned incoming volume
+            # No point showing configs that would fail immediately
+            if max_daily_volume < daily_volume_cy:
+                continue
+            
             # Calculate buffer/headroom
-            if max_daily_volume >= daily_volume_cy:
-                buffer_cy = max_daily_volume - daily_volume_cy
-                buffer_pct = (buffer_cy / daily_volume_cy) * 100
-            else:
-                buffer_cy = daily_volume_cy - max_daily_volume
-                buffer_pct = -((buffer_cy / daily_volume_cy) * 100)
+            buffer_cy = max_daily_volume - daily_volume_cy
+            buffer_pct = (buffer_cy / daily_volume_cy) * 100
             
             # Calculate metrics
             total_capacity = cell_volume * num_cells
@@ -1039,13 +1040,11 @@ def main():
                     return 'background-color: #FFB6C1'  # Light red
             
             def color_buffer(val):
-                """Color code buffer % - green for positive, red for negative"""
+                """Color code buffer % - green for excellent (≥50%), yellow for adequate (<50%)"""
                 if val >= 50:
                     return 'background-color: #90EE90'  # Light green - excellent headroom
-                elif val >= 0:
-                    return 'background-color: #FFFFE0'  # Light yellow - some headroom
                 else:
-                    return 'background-color: #FFB6C1'  # Light red - can't handle volume
+                    return 'background-color: #FFFFE0'  # Light yellow - adequate headroom
             
             # Apply styling
             styled_df = display_df[display_cols].style.applymap(
@@ -1085,7 +1084,7 @@ def main():
                     ),
                     "Buffer %": st.column_config.NumberColumn(
                         "Buffer %",
-                        help="Headroom above planned volume (green ≥50%, yellow ≥0%, red <0%)"
+                        help="Headroom above planned volume (green ≥50% excellent, yellow <50% adequate)"
                     )
                 },
                 disabled=display_cols,  # Only allow editing the Select column
@@ -1144,12 +1143,8 @@ def main():
                 st.metric("Max Daily Volume", f"{int(selected_config['max_daily_volume'])} CY/day",
                          help="Maximum soil volume this config can receive daily while maintaining continuous operation")
                 buffer_pct = selected_config['buffer_pct']
-                if buffer_pct >= 0:
-                    st.metric("Buffer Capacity", f"+{buffer_pct:.0f}%",
-                             help="Headroom above your planned daily volume")
-                else:
-                    st.metric("Buffer Capacity", f"{buffer_pct:.0f}%",
-                             help="Cannot handle your planned daily volume")
+                st.metric("Buffer Capacity", f"+{buffer_pct:.0f}%",
+                         help="Headroom above your planned daily volume for surge capacity")
             
             with detail_col4:
                 st.metric("Idle Days", f"{int(selected_config['idle_days'])}")
