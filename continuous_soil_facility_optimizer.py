@@ -484,6 +484,20 @@ def main():
     soil remediation facility based on daily incoming volume.
     """)
     
+    # Initialize session state
+    if 'optimization_run' not in st.session_state:
+        st.session_state.optimization_run = False
+    if 'results_df' not in st.session_state:
+        st.session_state.results_df = None
+    if 'optimal_config' not in st.session_state:
+        st.session_state.optimal_config = None
+    if 'parameters' not in st.session_state:
+        st.session_state.parameters = {}
+    if 'schedule_generated' not in st.session_state:
+        st.session_state.schedule_generated = False
+    if 'schedule_df' not in st.session_state:
+        st.session_state.schedule_df = None
+    
     # Sidebar for inputs
     with st.sidebar:
         st.header("⚙️ Facility Parameters")
@@ -633,10 +647,46 @@ def main():
                 step_size=50
             )
             
-            if results_df is None or len(results_df) == 0:
-                st.error("❌ No valid configurations found. Try adjusting constraints.")
-                st.info("Suggestions: Increase max cell size, increase loading capacity, or increase max loading days")
-            else:
+            # Store in session state
+            st.session_state.results_df = results_df
+            st.session_state.optimal_config = results_df.iloc[0] if results_df is not None and len(results_df) > 0 else None
+            st.session_state.optimization_run = True
+            # Clear any previous schedule when new optimization runs
+            st.session_state.schedule_generated = False
+            st.session_state.schedule_df = None
+            st.session_state.parameters = {
+                'daily_volume': daily_volume,
+                'cell_depth': cell_depth,
+                'cell_depth_inches': cell_depth * 12,
+                'daily_load_capacity': daily_load_capacity,
+                'daily_unload_capacity': daily_unload_capacity,
+                'phase_params': phase_params,
+                'weekend_params': weekend_params,
+                'rip_days': rip_days,
+                'treat_days': treat_days,
+                'dry_days': dry_days
+            }
+    
+    # Display results if optimization has been run
+    if st.session_state.optimization_run and st.session_state.results_df is not None:
+        results_df = st.session_state.results_df
+        optimal = st.session_state.optimal_config
+        
+        # Retrieve parameters
+        daily_volume = st.session_state.parameters['daily_volume']
+        cell_depth = st.session_state.parameters['cell_depth']
+        daily_load_capacity = st.session_state.parameters['daily_load_capacity']
+        daily_unload_capacity = st.session_state.parameters['daily_unload_capacity']
+        phase_params = st.session_state.parameters['phase_params']
+        weekend_params = st.session_state.parameters['weekend_params']
+        rip_days = st.session_state.parameters['rip_days']
+        treat_days = st.session_state.parameters['treat_days']
+        dry_days = st.session_state.parameters['dry_days']
+        
+        if results_df is None or len(results_df) == 0:
+            st.error("❌ No valid configurations found. Try adjusting constraints.")
+            st.info("Suggestions: Increase max cell size, increase loading capacity, or increase max loading days")
+        else:
                 # Display optimal configuration
                 st.success("✅ Optimization Complete")
                 
@@ -1004,7 +1054,8 @@ def main():
                     schedule_start_date = st.date_input(
                         "Schedule Start Date",
                         value=datetime.now().date(),
-                        help="First day of facility operations"
+                        help="First day of facility operations",
+                        key="schedule_start_date"
                     )
                 
                 with col2:
@@ -1014,10 +1065,11 @@ def main():
                         max_value=365,
                         value=90,
                         step=30,
-                        help="Number of days to simulate"
+                        help="Number of days to simulate",
+                        key="schedule_days_input"
                     )
                 
-                if st.button("📊 Generate Detailed Schedule", type="primary"):
+                if st.button("📊 Generate Detailed Schedule", type="primary", key="generate_schedule_btn"):
                     with st.spinner("Generating detailed treatment schedule..."):
                         # Convert date to datetime
                         schedule_start = datetime.combine(schedule_start_date, datetime.min.time())
@@ -1034,25 +1086,36 @@ def main():
                             schedule_days
                         )
                         
-                        # Display preview
-                        st.success("✅ Schedule Generated!")
-                        st.markdown("**Schedule Preview** (first 14 days)")
-                        
-                        # Create display version
-                        display_cols = ['Date', 'DayName']
-                        for i in range(1, int(optimal['num_cells']) + 1):
-                            display_cols.append(f'Cell_{i}_Phase')
-                        display_cols.extend(['SoilWaiting', 'CumSoilIn', 'CumSoilOut'])
-                        
-                        preview_df = schedule_df[display_cols].head(14).copy()
-                        preview_df['Date'] = preview_df['Date'].dt.strftime('%Y-%m-%d')
-                        st.dataframe(preview_df, use_container_width=True, hide_index=True)
-                        
-                        # Create formatted Excel export
-                        st.markdown("**Export Formatted Schedule**")
-                        
-                        output_schedule = BytesIO()
-                        with pd.ExcelWriter(output_schedule, engine='openpyxl') as writer:
+                        # Store in session state
+                        st.session_state.schedule_df = schedule_df
+                        st.session_state.schedule_generated = True
+                        st.session_state.schedule_start_date = schedule_start
+                
+                # Display schedule if it has been generated
+                if st.session_state.schedule_generated and st.session_state.schedule_df is not None:
+                    schedule_df = st.session_state.schedule_df
+                    schedule_start = st.session_state.schedule_start_date
+                    
+                    # Display preview
+                    st.success("✅ Schedule Generated!")
+                    st.markdown("**Schedule Preview** (first 14 days)")
+                    
+                    # Create display version
+                    display_cols = ['Date', 'DayName']
+                    for i in range(1, int(optimal['num_cells']) + 1):
+                        display_cols.append(f'Cell_{i}_Phase')
+                    display_cols.extend(['SoilWaiting', 'CumSoilIn', 'CumSoilOut'])
+                    
+                    preview_df = schedule_df[display_cols].head(14).copy()
+                    preview_df['Date'] = preview_df['Date'].dt.strftime('%Y-%m-%d')
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                    
+                    # Create formatted Excel export
+                    st.markdown("**Export Formatted Schedule**")
+                    
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    output_schedule = BytesIO()
+                    with pd.ExcelWriter(output_schedule, engine='openpyxl') as writer:
                             # Write schedule
                             schedule_export = schedule_df.copy()
                             schedule_export.to_excel(writer, sheet_name='Schedule', index=False)
@@ -1165,17 +1228,17 @@ def main():
                             for column_cells in worksheet.columns:
                                 length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
                                 worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 2, 50)
-                        
-                        output_schedule.seek(0)
-                        
-                        schedule_filename = f"treatment_schedule_{timestamp}.xlsx"
-                        st.download_button(
-                            label="📥 Download Formatted Schedule",
-                            data=output_schedule,
-                            file_name=schedule_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="download_schedule"
-                        )
+                    
+                    output_schedule.seek(0)
+                    
+                    schedule_filename = f"treatment_schedule_{timestamp}.xlsx"
+                    st.download_button(
+                        label="📥 Download Formatted Schedule",
+                        data=output_schedule,
+                        file_name=schedule_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_schedule"
+                    )
     
     else:
         # Initial state - show instructions
