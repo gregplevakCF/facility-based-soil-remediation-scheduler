@@ -1027,25 +1027,65 @@ def main():
                 subset=['Buffer %']
             )
             
-            # Display the table
-            st.dataframe(
-                styled_df,
+            # Display the table with row selection
+            st.markdown("**Click a row to select that configuration:**")
+            
+            # Use data_editor for selection capability
+            selection_df = display_df[display_cols].copy()
+            selection_df.insert(0, 'Select', False)
+            
+            edited_df = st.data_editor(
+                selection_df,
                 use_container_width=True,
                 hide_index=True,
-                height=min(400, len(display_df) * 35 + 38)
+                height=min(400, len(display_df) * 35 + 38),
+                column_config={
+                    "Select": st.column_config.CheckboxColumn(
+                        "✓",
+                        help="Select this configuration",
+                        default=False,
+                        width="small"
+                    ),
+                    "Idle Days": st.column_config.NumberColumn(
+                        "Idle Days",
+                        help="Days where soil arrives but can't be loaded (0 = continuous operation)"
+                    ),
+                    "Max Daily (CY)": st.column_config.NumberColumn(
+                        "Max Daily (CY)",
+                        help="Maximum daily volume this config can handle"
+                    ),
+                    "Buffer %": st.column_config.NumberColumn(
+                        "Buffer %",
+                        help="Headroom above planned volume (green ≥50%, yellow ≥0%, red <0%)"
+                    )
+                },
+                disabled=display_cols,  # Only allow editing the Select column
+                key="config_matrix"
             )
+            
+            # Find selected row from checkbox
+            selected_rows = edited_df[edited_df['Select'] == True].index.tolist()
+            
+            # Default to first row if nothing selected, or use the selected row
+            if selected_rows:
+                default_index = selected_rows[0]
+            elif 'selected_config_index' in st.session_state:
+                default_index = st.session_state.selected_config_index
+            else:
+                default_index = 0
             
             # Row selection for schedule generation
             st.markdown("---")
-            st.subheader("📋 Select Configuration for Schedule")
+            st.subheader("📋 Selected Configuration")
             
             col1, col2 = st.columns([3, 1])
             
             with col1:
                 selected_index = st.selectbox(
-                    "Choose a configuration to generate detailed schedule:",
+                    "Configuration (or click checkbox above):",
                     options=range(len(results_df)),
-                    format_func=lambda x: f"Config {x+1}: {int(results_df.iloc[x]['num_cells'])} × {int(results_df.iloc[x]['cell_volume_cy'])} CY ({int(results_df.iloc[x]['idle_days'])} idle days)",
+                    format_func=lambda x: f"Config {x+1}: {int(results_df.iloc[x]['num_cells'])} × {int(results_df.iloc[x]['cell_volume_cy'])} CY ({int(results_df.iloc[x]['idle_days'])} idle days, max {int(results_df.iloc[x]['max_daily_volume'])} CY/day)",
+                    index=default_index,
                     key="config_selector"
                 )
                 st.session_state.selected_config_index = selected_index
@@ -1053,9 +1093,9 @@ def main():
             with col2:
                 idle = results_df.iloc[selected_index]['idle_days']
                 if idle == 0:
-                    st.success("✅ Continuous Operation")
+                    st.success("✅ Continuous")
                 else:
-                    st.warning(f"⚠️ {int(idle)} Idle Days")
+                    st.warning(f"⚠️ {int(idle)} Idle")
             
             # Display selected configuration details
             selected_config = results_df.iloc[selected_index]
@@ -1205,8 +1245,9 @@ def main():
                     'Number of Cells',
                     'Total Facility Capacity (CY)',
                     'Cycle Time (days)',
-                    'Facility Utilization (%)',
-                    'Equipment Utilization (%)'
+                    'Idle Days',
+                    'Max Daily Volume (CY/day)',
+                    'Buffer Capacity (%)'
                 ],
                 'Value': [
                     daily_volume,
@@ -1221,8 +1262,9 @@ def main():
                     selected_config['num_cells'],
                     selected_config['total_capacity_cy'],
                     selected_config['cycle_days'],
-                    f"{selected_config['utilization']*100:.1f}",
-                    f"{selected_config['equipment_utilization']*100:.1f}"
+                    selected_config['idle_days'],
+                    selected_config['max_daily_volume'],
+                    f"{selected_config['buffer_pct']:.1f}"
                 ]
             }
             summary_df = pd.DataFrame(summary_data)
@@ -1471,41 +1513,39 @@ def main():
         
         1. **Analyzing Your Requirements**: Input your daily incoming soil volume and operational parameters
         2. **Calculating Cycle Times**: Determines how long each treatment cell takes to complete a full cycle
-        3. **Finding All Viable Configurations**: Generates a matrix of options balancing:
-           - Number of cells (capital cost)
-           - Cell size (volume in CY)
-           - Facility utilization (capacity management)
-           - **Equipment utilization (keeping loaders/excavators busy daily)**
-           - Loading time (operational constraints)
-        4. **You Choose**: Select the configuration that best fits your needs
-        5. **Generating Schedules**: Creates detailed day-by-day treatment schedules for your selected configuration
+        3. **Finding Optimal Configurations**: Generates configurations prioritized by:
+           - **Zero idle days** (continuous operation - never turn away work)
+           - **Fewest cells** (minimize capital cost)
+           - **Smallest cell size** (if tied on cell count)
+        4. **Showing Capacity Limits**: Calculates the **maximum daily volume** each config can handle
+        5. **You Choose**: Select the configuration that best fits your needs
+        6. **Generating Schedules**: Creates detailed day-by-day treatment schedules
         
         ### Key Features
         
-        - **Configuration Matrix**: Shows ALL viable options, not just one "optimal" recommendation
-        - **Comparison Tools**: Sort and filter by any metric - cell size, number, utilization, etc.
-        - **Equipment Productivity**: Tracks how often loaders and excavators stay busy
-        - **Color-Coded Utilization**: Green = good, yellow = fair, red = poor
+        - **Configuration Matrix**: Shows all options with idle days, max capacity, and buffer %
+        - **Continuous Operation Check**: Green = zero idle days, Red = will turn away work
+        - **Max Daily Volume**: The maximum CY/day each config can process continuously
+        - **Buffer Capacity**: Headroom above your planned volume for surge capacity
         - **Weekend Scheduling**: Customizable work schedules by phase
         - **Detailed Schedules**: Day-by-day tracking of all cells with color-coded phases
-        - **Excel Export**: Formatted reports with all configurations and selected config details
+        - **Excel Export**: Formatted reports with all configurations
         
-        ### Why Equipment Utilization Matters
+        ### Why Continuous Operation Matters
         
-        **Idle equipment = wasted money.** The analysis shows equipment utilization because:
-        - Loaders and excavators are expensive assets (purchase or rental)
-        - Operators are paid whether equipment is working or idle
-        - Smaller, more numerous cells = more consistent daily work
-        - Larger cells = longer loading periods = more idle days between operations
+        **Turning away work = lost revenue.** The primary goal is:
+        - Always have a cell available when soil arrives
+        - Never have to tell a customer "come back later"
+        - Equipment stays productive (loading or unloading every work day)
         
-        **Target**: 75-85%+ equipment utilization means your team works productively most days.
+        **Zero idle days** means continuous operation is guaranteed.
         
         ### Key Tradeoffs
         
-        - **More cells** = Higher capital cost, BUT better equipment utilization and surge capacity
-        - **Larger cells** = Fewer cells needed, BUT longer loading times and more equipment idle days
-        - **Facility utilization** = 80-90% is good for capacity management
-        - **Equipment utilization** = 75-85%+ minimizes idle time and maximizes productivity
+        - **More cells** = Higher capital cost, BUT more surge capacity and reliability
+        - **Larger cells** = Fewer cells needed, BUT longer loading times and less flexibility
+        - **Max Daily Volume** = Shows how much headroom you have for growth
+        - **Buffer %** = Higher is better for handling volume spikes
         
         ### Workflow
         
@@ -1514,8 +1554,8 @@ def main():
         3. Set treatment phase durations
         4. Define weekend working schedules
         5. Run the analysis
-        6. **Review the configuration matrix** - all options shown
-        7. **Select your preferred configuration** - you decide what's best
+        6. **Review the configuration matrix** - prioritized by continuous operation
+        7. **Select your preferred configuration** - check the max capacity fits your needs
         8. Generate detailed treatment schedule for selected config
         9. Export results and schedules
         """)
