@@ -117,7 +117,7 @@ def calculate_loading_time(cell_volume_cy, daily_load_capacity, saturday_work, s
     }
 
 
-def calculate_total_cycle_time(cell_volume_cy, daily_incoming_volume, daily_unload_capacity,
+def calculate_total_cycle_time(cell_volume_cy, daily_incoming_volume, daily_equipment_capacity,
                                rip_days, treat_days, dry_days,
                                load_saturday, load_sunday,
                                rip_saturday, rip_sunday,
@@ -128,6 +128,7 @@ def calculate_total_cycle_time(cell_volume_cy, daily_incoming_volume, daily_unlo
     
     Key: Loading time is based on INCOMING VOLUME, not equipment capacity.
     You can only load what actually arrives each day.
+    Unloading time is based on equipment capacity.
     """
     
     # Loading time - constrained by incoming volume, not equipment
@@ -152,7 +153,7 @@ def calculate_total_cycle_time(cell_volume_cy, daily_incoming_volume, daily_unlo
     )
     
     # Unloading time - constrained by equipment capacity
-    unload_workdays = math.ceil(cell_volume_cy / daily_unload_capacity)
+    unload_workdays = math.ceil(cell_volume_cy / daily_equipment_capacity)
     unload_calendar_days = calculate_calendar_days_for_workdays(
         unload_workdays, datetime.now(), unload_saturday, unload_sunday
     )
@@ -198,7 +199,7 @@ def calculate_cells_needed(daily_volume, cell_volume, cycle_days, buffer_factor=
     }
 
 
-def find_max_daily_volume(num_cells, cell_volume, daily_unload_capacity,
+def find_max_daily_volume(num_cells, cell_volume, daily_equipment_capacity,
                           phase_params, weekend_params, simulation_days=120):
     """Binary search to find the maximum daily volume a configuration can handle
     while maintaining continuous operation (zero idle days).
@@ -212,7 +213,7 @@ def find_max_daily_volume(num_cells, cell_volume, daily_unload_capacity,
     while low <= high:
         mid = (low + high) // 2
         idle_days, _ = simulate_for_idle_days(
-            num_cells, cell_volume, mid, daily_unload_capacity,
+            num_cells, cell_volume, mid, daily_equipment_capacity,
             phase_params, weekend_params, simulation_days
         )
         
@@ -225,8 +226,8 @@ def find_max_daily_volume(num_cells, cell_volume, daily_unload_capacity,
     return max_found
 
 
-def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
-                                daily_unload_capacity, phase_params, weekend_params,
+def optimize_cell_configuration(daily_volume_cy, daily_equipment_capacity,
+                                phase_params, weekend_params,
                                 max_loading_days=14, min_cell_volume=100, 
                                 max_cell_volume=5000, step_size=50):
     """Find optimal cell configurations prioritized by:
@@ -253,7 +254,7 @@ def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
         cycle_info = calculate_total_cycle_time(
             cell_volume,
             daily_volume_cy,  # Loading constrained by incoming volume
-            daily_unload_capacity,
+            daily_equipment_capacity,
             phase_params['rip_days'],
             phase_params['treat_days'],
             phase_params['dry_days'],
@@ -274,13 +275,13 @@ def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
             
             # Run simulation to get actual idle days
             idle_days, max_waiting = simulate_for_idle_days(
-                num_cells, cell_volume, daily_volume_cy, daily_unload_capacity,
+                num_cells, cell_volume, daily_volume_cy, daily_equipment_capacity,
                 phase_params, weekend_params, simulation_days=90
             )
             
             # Calculate maximum daily volume this config can handle
             max_daily_volume = find_max_daily_volume(
-                num_cells, cell_volume, daily_unload_capacity,
+                num_cells, cell_volume, daily_equipment_capacity,
                 phase_params, weekend_params
             )
             
@@ -333,9 +334,16 @@ def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
     return results_df
 
 
-def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_unload_capacity,
+def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipment_capacity,
                            phase_params, weekend_params, simulation_days=90):
-    """Quick simulation to count idle days (days where soil arrives but can't be loaded)"""
+    """Quick simulation to count idle days (days where soil arrives but can't be loaded)
+    
+    Key rules:
+    - Equipment capacity is SHARED between loading and unloading
+    - Lower-numbered cells get priority for equipment
+    - Only one cell can be in Loading phase at a time
+    - Only one cell can be in Unloading phase at a time
+    """
     
     def is_work_day(date, phase_type):
         day_of_week = date.weekday()
@@ -370,13 +378,14 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_unload
         return True
     
     class CellState:
-        def __init__(self):
+        def __init__(self, cell_num):
+            self.cell_num = cell_num
             self.phase = 'Empty'
             self.soil_volume = 0
             self.phase_workdays_completed = 0
             self.pending_transition = None
     
-    cells = [CellState() for _ in range(num_cells)]
+    cells = [CellState(i) for i in range(num_cells)]
     current_date = datetime(2025, 12, 1)
     
     active_loading_cell = None
@@ -401,54 +410,66 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_unload
         if is_work_day(current_date, 'load'):
             soil_waiting += daily_volume_cy
         
+        # Equipment capacity available today (shared between loading and unloading)
+        equipment_remaining = daily_equipment_capacity
         loaded_today = False
         
-        # Unloading
-        if is_work_day(current_date, 'unload'):
-            if active_unloading_cell is None:
-                for i, cell in enumerate(cells):
-                    if cell.phase == 'ReadyToUnload':
-                        active_unloading_cell = i
-                        cell.phase = 'Unloading'
-                        break
-            
-            if active_unloading_cell is not None:
-                cell = cells[active_unloading_cell]
-                if cell.phase == 'Unloading':
-                    unload_amount = min(cell.soil_volume, daily_unload_capacity)
-                    cell.soil_volume -= unload_amount
-                    if cell.soil_volume <= 0:
-                        cell.pending_transition = 'Empty'
+        # Determine if it's a work day for loading/unloading
+        can_load = is_work_day(current_date, 'load')
+        can_unload = is_work_day(current_date, 'unload')
         
-        # Loading
-        if is_work_day(current_date, 'load'):
-            if active_loading_cell is None:
-                for i, cell in enumerate(cells):
-                    if cell.phase == 'Empty':
-                        active_loading_cell = i
-                        cell.phase = 'Loading'
-                        cell.soil_volume = 0
-                        break
+        # Find or assign active loading cell (lowest numbered empty cell)
+        if can_load and active_loading_cell is None:
+            for i, cell in enumerate(cells):
+                if cell.phase == 'Empty':
+                    active_loading_cell = i
+                    cell.phase = 'Loading'
+                    cell.soil_volume = 0
+                    break
+        
+        # Find or assign active unloading cell (lowest numbered ready cell)
+        if can_unload and active_unloading_cell is None:
+            for i, cell in enumerate(cells):
+                if cell.phase == 'ReadyToUnload':
+                    active_unloading_cell = i
+                    cell.phase = 'Unloading'
+                    break
+        
+        # Process cells in order (lowest number first) - SHARED EQUIPMENT
+        for i in range(num_cells):
+            if equipment_remaining <= 0:
+                break
             
-            if active_loading_cell is not None and soil_waiting > 0:
-                cell = cells[active_loading_cell]
-                if cell.phase == 'Loading':
-                    space_remaining = cell_volume - cell.soil_volume
-                    load_amount = min(space_remaining, daily_volume_cy, soil_waiting)
-                    if load_amount > 0:
-                        cell.soil_volume += load_amount
-                        soil_waiting -= load_amount
-                        loaded_today = True
-                    if cell.soil_volume >= cell_volume:
-                        cell.pending_transition = 'Rip'
+            cell = cells[i]
             
-            # Count as idle day if soil arrived but we couldn't load
-            if not loaded_today:
-                idle_days += 1
+            # Loading
+            if i == active_loading_cell and can_load and cell.phase == 'Loading' and soil_waiting > 0:
+                space_remaining = cell_volume - cell.soil_volume
+                load_amount = min(space_remaining, daily_volume_cy, soil_waiting, equipment_remaining)
+                if load_amount > 0:
+                    cell.soil_volume += load_amount
+                    soil_waiting -= load_amount
+                    equipment_remaining -= load_amount
+                    loaded_today = True
+                if cell.soil_volume >= cell_volume:
+                    cell.pending_transition = 'Rip'
+            
+            # Unloading
+            elif i == active_unloading_cell and can_unload and cell.phase == 'Unloading':
+                unload_amount = min(cell.soil_volume, equipment_remaining)
+                if unload_amount > 0:
+                    cell.soil_volume -= unload_amount
+                    equipment_remaining -= unload_amount
+                if cell.soil_volume <= 0:
+                    cell.pending_transition = 'Empty'
+        
+        # Count as idle day if soil arrived but we couldn't load any
+        if can_load and not loaded_today:
+            idle_days += 1
         
         max_waiting = max(max_waiting, soil_waiting)
         
-        # Treatment phases
+        # Treatment phases (don't use equipment)
         for cell in cells:
             if cell.phase == 'Rip':
                 if is_work_day(current_date, 'rip'):
@@ -490,17 +511,18 @@ def is_valid_work_day(date, phase_name, weekend_params):
     return False
 
 
-def simulate_facility_schedule(config, daily_volume_cy, daily_load_capacity, 
-                               daily_unload_capacity, phase_params, weekend_params,
+def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity, 
+                               phase_params, weekend_params,
                                start_date, simulation_days=180):
-    """Simulate facility operations with SEQUENTIAL cell loading/unloading
+    """Simulate facility operations with SHARED equipment and cell priority
     
     Key Rules:
-    - Only ONE cell can be loading at a time
-    - Only ONE cell can be unloading at a time
-    - BUT loading and unloading CAN happen on the same day (different equipment)
-    - Loading limited by: min(incoming_soil_available, equipment_capacity, cell_space)
-    - Unloading limited by: min(soil_in_cell, equipment_capacity)
+    - Equipment capacity is SHARED between loading and unloading
+    - Lower-numbered cells get priority for equipment
+    - Only ONE cell can be in Loading phase at a time
+    - Only ONE cell can be in Unloading phase at a time
+    - Loading limited by: min(incoming_soil_available, equipment_remaining, cell_space)
+    - Unloading limited by: min(soil_in_cell, equipment_remaining)
     - Phase transitions happen at the START of the next day
     """
     
@@ -569,78 +591,78 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_load_capacity,
         daily_soil_in = 0
         daily_soil_out = 0
         
-        # ============================================================
-        # UNLOADING (can happen same day as loading - separate equipment)
-        # Only ONE cell unloads at a time!
-        # ============================================================
-        if is_valid_work_day(current_date, 'unload', weekend_params):
-            
-            # If no active unloading cell, find one that's ready
-            if active_unloading_cell is None:
-                for cell_num in range(1, num_cells + 1):
-                    cell = cells[cell_num]
-                    if cell.phase == 'ReadyToUnload':
-                        active_unloading_cell = cell_num
-                        cell.phase = 'Unloading'
-                        break
-            
-            # Unload the active cell
-            if active_unloading_cell is not None:
-                cell = cells[active_unloading_cell]
-                if cell.phase == 'Unloading':
-                    # Unload limited by equipment capacity and soil in cell
-                    unload_amount = min(cell.soil_volume, daily_unload_capacity)
-                    
-                    if unload_amount > 0:
-                        cell.soil_volume -= unload_amount
-                        daily_soil_out = unload_amount
-                        total_soil_unloaded += unload_amount
-                    
-                    # Check if unloading complete - schedule transition for tomorrow
-                    if cell.soil_volume <= 0:
-                        cell.pending_transition = 'Empty'
-                        cell.flip_num = 0
+        # Equipment capacity available today (shared between loading and unloading)
+        equipment_remaining = daily_equipment_capacity
+        
+        # Determine what work can be done today
+        can_load = is_valid_work_day(current_date, 'load', weekend_params)
+        can_unload = is_valid_work_day(current_date, 'unload', weekend_params)
         
         # ============================================================
-        # LOADING (can happen same day as unloading - separate equipment)
-        # Only ONE cell loads at a time!
-        # KEY: Loading rate is LIMITED BY INCOMING VOLUME, not equipment capacity
-        # You can only load what arrives that day, even if soil has accumulated
+        # ASSIGN ACTIVE CELLS (if needed)
         # ============================================================
-        if is_valid_work_day(current_date, 'load', weekend_params):
+        # Find or assign active loading cell (lowest numbered empty cell)
+        if can_load and active_loading_cell is None:
+            for cell_num in range(1, num_cells + 1):
+                cell = cells[cell_num]
+                if cell.phase == 'Empty':
+                    cell.phase = 'Loading'
+                    cell.flip_num = next_flip_num
+                    next_flip_num += 1
+                    cell.soil_volume = 0
+                    active_loading_cell = cell_num
+                    break
+        
+        # Find or assign active unloading cell (lowest numbered ready cell)
+        if can_unload and active_unloading_cell is None:
+            for cell_num in range(1, num_cells + 1):
+                cell = cells[cell_num]
+                if cell.phase == 'ReadyToUnload':
+                    active_unloading_cell = cell_num
+                    cell.phase = 'Unloading'
+                    break
+        
+        # ============================================================
+        # PROCESS CELLS IN ORDER (lowest number first) - SHARED EQUIPMENT
+        # ============================================================
+        for cell_num in range(1, num_cells + 1):
+            if equipment_remaining <= 0:
+                break
             
-            # If no active loading cell, find an empty one to start
-            if active_loading_cell is None:
-                for cell_num in range(1, num_cells + 1):
-                    cell = cells[cell_num]
-                    if cell.phase == 'Empty':
-                        cell.phase = 'Loading'
-                        cell.flip_num = next_flip_num
-                        next_flip_num += 1
-                        cell.soil_volume = 0
-                        active_loading_cell = cell_num
-                        break
+            cell = cells[cell_num]
             
-            # Load the active cell
-            if active_loading_cell is not None and soil_waiting > 0:
-                cell = cells[active_loading_cell]
-                if cell.phase == 'Loading':
-                    space_remaining = cell_volume - cell.soil_volume
-                    
-                    # KEY CONSTRAINT: Loading rate = daily incoming volume
-                    # Can't load faster than soil arrives, even if pile has accumulated
-                    # Equipment capacity is NOT the limiting factor for loading
-                    load_amount = min(space_remaining, daily_volume_cy, soil_waiting)
-                    
-                    if load_amount > 0:
-                        cell.soil_volume += load_amount
-                        soil_waiting -= load_amount  # Remove from waiting pile
-                        daily_soil_in = load_amount
-                        total_soil_loaded += load_amount
-                    
-                    # Check if loading complete - schedule transition for tomorrow
-                    if cell.soil_volume >= cell_volume:
-                        cell.pending_transition = 'Rip'
+            # LOADING - this cell is actively loading
+            if cell_num == active_loading_cell and can_load and cell.phase == 'Loading' and soil_waiting > 0:
+                space_remaining = cell_volume - cell.soil_volume
+                # Loading limited by: space, incoming volume rate, soil waiting, AND equipment
+                load_amount = min(space_remaining, daily_volume_cy, soil_waiting, equipment_remaining)
+                
+                if load_amount > 0:
+                    cell.soil_volume += load_amount
+                    soil_waiting -= load_amount
+                    equipment_remaining -= load_amount
+                    daily_soil_in = load_amount
+                    total_soil_loaded += load_amount
+                
+                # Check if loading complete - schedule transition for tomorrow
+                if cell.soil_volume >= cell_volume:
+                    cell.pending_transition = 'Rip'
+            
+            # UNLOADING - this cell is actively unloading
+            elif cell_num == active_unloading_cell and can_unload and cell.phase == 'Unloading':
+                # Unloading limited by: soil in cell AND equipment
+                unload_amount = min(cell.soil_volume, equipment_remaining)
+                
+                if unload_amount > 0:
+                    cell.soil_volume -= unload_amount
+                    equipment_remaining -= unload_amount
+                    daily_soil_out = unload_amount
+                    total_soil_unloaded += unload_amount
+                
+                # Check if unloading complete - schedule transition for tomorrow
+                if cell.soil_volume <= 0:
+                    cell.pending_transition = 'Empty'
+                    cell.flip_num = 0
         
         # ============================================================
         # PHASE 3: Progress treatment phases for ALL cells
@@ -754,29 +776,20 @@ def main():
             "Daily Soil Volume (CY/day)",
             min_value=10,
             max_value=5000,
-            value=200,
+            value=300,
             step=10,
             help="Average daily volume of soil arriving at facility"
         )
         
         # Equipment Capacity
         st.subheader("Equipment Capacity")
-        daily_load_capacity = st.number_input(
-            "Daily Loading Capacity (CY/day)",
+        daily_equipment_capacity = st.number_input(
+            "Daily Equipment Capacity (CY/day)",
             min_value=50,
             max_value=2000,
             value=750,
             step=25,
-            help="Maximum soil that can be loaded per day"
-        )
-        
-        daily_unload_capacity = st.number_input(
-            "Daily Unloading Capacity (CY/day)",
-            min_value=50,
-            max_value=2000,
-            value=750,
-            step=25,
-            help="Maximum soil that can be unloaded per day"
+            help="Total soil that can be moved per day (loading + unloading combined). Equipment is shared - prioritizes lowest-numbered active cell."
         )
         
         # Phase Durations
@@ -870,8 +883,7 @@ def main():
             # Run optimization
             results_df = optimize_cell_configuration(
                 daily_volume,
-                daily_load_capacity,
-                daily_unload_capacity,
+                daily_equipment_capacity,
                 phase_params,
                 weekend_params,
                 max_loading_days=max_loading_days,
@@ -890,8 +902,7 @@ def main():
             st.session_state.schedule_start = None
             st.session_state.parameters = {
                 'daily_volume': daily_volume,
-                'daily_load_capacity': daily_load_capacity,
-                'daily_unload_capacity': daily_unload_capacity,
+                'daily_equipment_capacity': daily_equipment_capacity,
                 'phase_params': phase_params,
                 'weekend_params': weekend_params,
                 'rip_days': rip_days,
@@ -905,8 +916,7 @@ def main():
         
         # Retrieve parameters
         daily_volume = st.session_state.parameters['daily_volume']
-        daily_load_capacity = st.session_state.parameters['daily_load_capacity']
-        daily_unload_capacity = st.session_state.parameters['daily_unload_capacity']
+        daily_equipment_capacity = st.session_state.parameters['daily_equipment_capacity']
         phase_params = st.session_state.parameters['phase_params']
         weekend_params = st.session_state.parameters['weekend_params']
         rip_days = st.session_state.parameters['rip_days']
@@ -915,7 +925,7 @@ def main():
         
         if results_df is None or len(results_df) == 0:
             st.error("❌ No valid configurations found. Try adjusting constraints.")
-            st.info("Suggestions: Increase max cell size, increase loading capacity, or increase max loading days")
+            st.info("Suggestions: Increase max cell size, increase equipment capacity, or increase max loading days")
         else:
             # Count zero-idle configurations
             zero_idle_configs = results_df[results_df['idle_days'] == 0]
@@ -1234,8 +1244,7 @@ def main():
             summary_data = {
                 'Parameter': [
                     'Daily Incoming Volume (CY)',
-                    'Daily Load Capacity (CY)',
-                    'Daily Unload Capacity (CY)',
+                    'Daily Equipment Capacity (CY)',
                     'Rip Duration (days)',
                     'Treatment Duration (days)',
                     'Drying Duration (days)',
@@ -1251,8 +1260,7 @@ def main():
                 ],
                 'Value': [
                     daily_volume,
-                    daily_load_capacity,
-                    daily_unload_capacity,
+                    daily_equipment_capacity,
                     rip_days,
                     treat_days,
                     dry_days,
@@ -1335,8 +1343,7 @@ def main():
                             schedule_df = simulate_facility_schedule(
                                 selected_config,
                                 daily_volume,
-                                daily_load_capacity,
-                                daily_unload_capacity,
+                                daily_equipment_capacity,
                                 phase_params,
                                 weekend_params,
                                 schedule_start,
