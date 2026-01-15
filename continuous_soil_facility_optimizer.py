@@ -198,16 +198,56 @@ def calculate_cells_needed(daily_volume, cell_volume, cycle_days, buffer_factor=
     }
 
 
+def find_max_daily_volume(num_cells, cell_volume, daily_unload_capacity,
+                          phase_params, weekend_params, simulation_days=120):
+    """Binary search to find the maximum daily volume a configuration can handle
+    while maintaining continuous operation (zero idle days).
+    
+    Returns the maximum CY/day this config can process without turning away work.
+    """
+    
+    low, high = 50, 1500  # Search range for daily volume
+    max_found = 0
+    
+    while low <= high:
+        mid = (low + high) // 2
+        idle_days, _ = simulate_for_idle_days(
+            num_cells, cell_volume, mid, daily_unload_capacity,
+            phase_params, weekend_params, simulation_days
+        )
+        
+        if idle_days == 0:
+            max_found = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    
+    return max_found
+
+
 def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
                                 daily_unload_capacity, phase_params, weekend_params,
                                 max_loading_days=14, min_cell_volume=100, 
                                 max_cell_volume=5000, step_size=50):
-    """Find all viable cell configurations"""
+    """Find optimal cell configurations prioritized by:
+    1. Zero idle days (never turn away work)
+    2. Fewest cells (minimize capital cost)
+    3. Smallest cell size (if tied on cells)
+    
+    Runs simulation to determine actual idle days for each configuration.
+    """
     
     results = []
     
     # Test different cell sizes
     for cell_volume in range(min_cell_volume, max_cell_volume + 1, step_size):
+        
+        # Calculate loading days based on incoming volume (not equipment capacity)
+        load_days = cell_volume / daily_volume_cy
+        
+        # Skip if loading takes too long
+        if load_days > max_loading_days:
+            continue
         
         # Calculate cycle time
         cycle_info = calculate_total_cycle_time(
@@ -229,81 +269,59 @@ def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
             weekend_params['unload_sunday']
         )
         
-        # Skip if loading takes too long
-        if cycle_info['load_calendar_days'] > max_loading_days:
-            continue
-        
-        # Calculate cells needed
-        cells_info = calculate_cells_needed(
-            daily_volume_cy,
-            cell_volume,
-            cycle_info['total_calendar_days']
-        )
-        
-        # Calculate capacity metrics
-        total_facility_capacity = cell_volume * cells_info['min_cells_with_buffer']
-        days_of_capacity = total_facility_capacity / daily_volume_cy
-        
-        # Calculate utilization
-        # How much soil can we process per day on average?
-        daily_throughput = cell_volume / cycle_info['total_calendar_days']
-        utilization = daily_volume_cy / (daily_throughput * cells_info['min_cells_with_buffer'])
-        
-        # Calculate equipment activity metrics
-        # With continuous incoming volume, loading happens every work day
-        # The question is: are cells staggered so there's always one ready to load?
-        num_cells = cells_info['min_cells_with_buffer']
-        
-        # Best case: cells start at regular intervals = cycle_time / num_cells
-        cell_start_interval = cycle_info['total_calendar_days'] / num_cells
-        
-        # Loading utilization: Are we loading every day?
-        # If load_days >= cell_start_interval, loading is continuous
-        if cycle_info['load_workdays'] >= cell_start_interval:
-            equipment_utilization = 1.0  # Loading happens every day
-        else:
-            # Some days have no loading (cell gap)
-            equipment_utilization = cycle_info['load_workdays'] / max(1, cell_start_interval)
-        
-        # Daily work consistency: loading rate matches incoming rate
-        # This should be 1.0 since we load exactly what comes in
-        load_consistency = 1.0  # Always loading at incoming rate
-        
-        # Unload equipment utilization: how often is unloading happening?
-        if cycle_info['unload_workdays'] >= cell_start_interval:
-            unload_equipment_utilization = 1.0
-        else:
-            unload_equipment_utilization = cycle_info['unload_workdays'] / max(1, cell_start_interval)
-        
-        # Combined: What % of days have BOTH loading AND unloading activity?
-        # (In steady state, loading is ~100%, unloading varies)
-        combined_equipment_util = (equipment_utilization + unload_equipment_utilization) / 2
-        
-        # Score: prefer fewer cells, good facility utilization
-        # Lower score is better
-        score = (
-            cells_info['min_cells_with_buffer'] * 100 +  # Capital cost (fewer cells better)
-            (1 - utilization) * 500 +  # Facility utilization (higher better)
-            (1 - combined_equipment_util) * 500  # Equipment activity (higher better)
-        )
-        
-        results.append({
-            'cell_volume_cy': cell_volume,
-            'num_cells': cells_info['min_cells_with_buffer'],
-            'load_days': cycle_info['load_calendar_days'],
-            'cycle_days': cycle_info['total_calendar_days'],
-            'total_capacity_cy': total_facility_capacity,
-            'days_of_capacity': days_of_capacity,
-            'utilization': utilization,
-            'daily_throughput': daily_throughput * cells_info['min_cells_with_buffer'],
-            'equipment_utilization': combined_equipment_util,
-            'load_equipment_util': equipment_utilization,
-            'unload_equipment_util': unload_equipment_utilization,
-            'load_consistency': load_consistency,
-            'cell_start_interval': cell_start_interval,
-            'score': score,
-            'cycle_breakdown': cycle_info
-        })
+        # Test different numbers of cells (2 to 12)
+        for num_cells in range(2, 13):
+            
+            # Run simulation to get actual idle days
+            idle_days, max_waiting = simulate_for_idle_days(
+                num_cells, cell_volume, daily_volume_cy, daily_unload_capacity,
+                phase_params, weekend_params, simulation_days=90
+            )
+            
+            # Calculate maximum daily volume this config can handle
+            max_daily_volume = find_max_daily_volume(
+                num_cells, cell_volume, daily_unload_capacity,
+                phase_params, weekend_params
+            )
+            
+            # Calculate buffer/headroom
+            if max_daily_volume >= daily_volume_cy:
+                buffer_cy = max_daily_volume - daily_volume_cy
+                buffer_pct = (buffer_cy / daily_volume_cy) * 100
+            else:
+                buffer_cy = daily_volume_cy - max_daily_volume
+                buffer_pct = -((buffer_cy / daily_volume_cy) * 100)
+            
+            # Calculate metrics
+            total_capacity = cell_volume * num_cells
+            
+            # Score: Primary=idle_days, Secondary=num_cells, Tertiary=cell_volume
+            # Lower is better for all three
+            # Weight idle_days very heavily - it's the primary constraint
+            score = (
+                idle_days * 100000 +  # Primary: zero idle days is critical
+                num_cells * 1000 +     # Secondary: fewer cells better
+                cell_volume            # Tertiary: smaller cells if tied
+            )
+            
+            results.append({
+                'cell_volume_cy': cell_volume,
+                'num_cells': num_cells,
+                'load_days': cycle_info['load_calendar_days'],
+                'cycle_days': cycle_info['total_calendar_days'],
+                'total_capacity_cy': total_capacity,
+                'idle_days': idle_days,
+                'max_waiting_cy': max_waiting,
+                'max_daily_volume': max_daily_volume,
+                'buffer_cy': buffer_cy,
+                'buffer_pct': buffer_pct,
+                'score': score,
+                'cycle_breakdown': cycle_info
+            })
+            
+            # If we found zero idle days, no need to try more cells for this size
+            if idle_days == 0:
+                break
     
     if not results:
         return None
@@ -313,6 +331,144 @@ def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
     results_df = results_df.sort_values('score').reset_index(drop=True)
     
     return results_df
+
+
+def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_unload_capacity,
+                           phase_params, weekend_params, simulation_days=90):
+    """Quick simulation to count idle days (days where soil arrives but can't be loaded)"""
+    
+    def is_work_day(date, phase_type):
+        day_of_week = date.weekday()
+        is_saturday = day_of_week == 5
+        is_sunday = day_of_week == 6
+        
+        if phase_type == 'load':
+            if is_saturday and not weekend_params['load_saturday']:
+                return False
+            if is_sunday and not weekend_params['load_sunday']:
+                return False
+        elif phase_type == 'unload':
+            if is_saturday and not weekend_params['unload_saturday']:
+                return False
+            if is_sunday and not weekend_params['unload_sunday']:
+                return False
+        elif phase_type == 'rip':
+            if is_saturday and not weekend_params['rip_saturday']:
+                return False
+            if is_sunday and not weekend_params['rip_sunday']:
+                return False
+        elif phase_type == 'treat':
+            if is_saturday and not weekend_params['treat_saturday']:
+                return False
+            if is_sunday and not weekend_params['treat_sunday']:
+                return False
+        elif phase_type == 'dry':
+            if is_saturday and not weekend_params['dry_saturday']:
+                return False
+            if is_sunday and not weekend_params['dry_sunday']:
+                return False
+        return True
+    
+    class CellState:
+        def __init__(self):
+            self.phase = 'Empty'
+            self.soil_volume = 0
+            self.phase_workdays_completed = 0
+            self.pending_transition = None
+    
+    cells = [CellState() for _ in range(num_cells)]
+    current_date = datetime(2025, 12, 1)
+    
+    active_loading_cell = None
+    active_unloading_cell = None
+    soil_waiting = 0
+    max_waiting = 0
+    idle_days = 0
+    
+    for day in range(simulation_days):
+        # Process pending transitions
+        for i, cell in enumerate(cells):
+            if cell.pending_transition:
+                cell.phase = cell.pending_transition
+                cell.pending_transition = None
+                cell.phase_workdays_completed = 0
+                if cell.phase == 'Rip' and active_loading_cell == i:
+                    active_loading_cell = None
+                if cell.phase == 'Empty' and active_unloading_cell == i:
+                    active_unloading_cell = None
+        
+        # Soil arrives on loading work days
+        if is_work_day(current_date, 'load'):
+            soil_waiting += daily_volume_cy
+        
+        loaded_today = False
+        
+        # Unloading
+        if is_work_day(current_date, 'unload'):
+            if active_unloading_cell is None:
+                for i, cell in enumerate(cells):
+                    if cell.phase == 'ReadyToUnload':
+                        active_unloading_cell = i
+                        cell.phase = 'Unloading'
+                        break
+            
+            if active_unloading_cell is not None:
+                cell = cells[active_unloading_cell]
+                if cell.phase == 'Unloading':
+                    unload_amount = min(cell.soil_volume, daily_unload_capacity)
+                    cell.soil_volume -= unload_amount
+                    if cell.soil_volume <= 0:
+                        cell.pending_transition = 'Empty'
+        
+        # Loading
+        if is_work_day(current_date, 'load'):
+            if active_loading_cell is None:
+                for i, cell in enumerate(cells):
+                    if cell.phase == 'Empty':
+                        active_loading_cell = i
+                        cell.phase = 'Loading'
+                        cell.soil_volume = 0
+                        break
+            
+            if active_loading_cell is not None and soil_waiting > 0:
+                cell = cells[active_loading_cell]
+                if cell.phase == 'Loading':
+                    space_remaining = cell_volume - cell.soil_volume
+                    load_amount = min(space_remaining, daily_volume_cy, soil_waiting)
+                    if load_amount > 0:
+                        cell.soil_volume += load_amount
+                        soil_waiting -= load_amount
+                        loaded_today = True
+                    if cell.soil_volume >= cell_volume:
+                        cell.pending_transition = 'Rip'
+            
+            # Count as idle day if soil arrived but we couldn't load
+            if not loaded_today:
+                idle_days += 1
+        
+        max_waiting = max(max_waiting, soil_waiting)
+        
+        # Treatment phases
+        for cell in cells:
+            if cell.phase == 'Rip':
+                if is_work_day(current_date, 'rip'):
+                    cell.phase_workdays_completed += 1
+                    if cell.phase_workdays_completed >= phase_params['rip_days']:
+                        cell.pending_transition = 'Treat'
+            elif cell.phase == 'Treat':
+                if is_work_day(current_date, 'treat'):
+                    cell.phase_workdays_completed += 1
+                    if cell.phase_workdays_completed >= phase_params['treat_days']:
+                        cell.pending_transition = 'Dry'
+            elif cell.phase == 'Dry':
+                if is_work_day(current_date, 'dry'):
+                    cell.phase_workdays_completed += 1
+                    if cell.phase_workdays_completed >= phase_params['dry_days']:
+                        cell.pending_transition = 'ReadyToUnload'
+        
+        current_date += timedelta(days=1)
+    
+    return idle_days, max_waiting
 
 
 def is_valid_work_day(date, phase_name, weekend_params):
@@ -399,8 +555,11 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_load_capacity,
         
         # ============================================================
         # DAILY INCOMING: Add today's incoming soil to waiting pile
+        # Soil only arrives on days when loading operations occur
+        # (If no loading on weekends, no deliveries on weekends)
         # ============================================================
-        soil_waiting += daily_volume_cy
+        if is_valid_work_day(current_date, 'load', weekend_params):
+            soil_waiting += daily_volume_cy
         
         day_record = {
             'Date': current_date,
@@ -758,45 +917,72 @@ def main():
             st.error("❌ No valid configurations found. Try adjusting constraints.")
             st.info("Suggestions: Increase max cell size, increase loading capacity, or increase max loading days")
         else:
-            st.success(f"✅ Found {len(results_df)} viable configurations")
+            # Count zero-idle configurations
+            zero_idle_configs = results_df[results_df['idle_days'] == 0]
+            
+            if len(zero_idle_configs) > 0:
+                st.success(f"✅ Found {len(zero_idle_configs)} configurations with continuous operation (zero idle days)")
+            else:
+                st.warning(f"⚠️ No configurations found with zero idle days. Showing {len(results_df)} configurations ranked by idle days.")
             
             # Summary stats
-            st.subheader("📊 Configuration Range Summary")
+            st.subheader("📊 Configuration Summary")
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric(
-                    "Cell Sizes",
-                    f"{results_df['cell_volume_cy'].min():.0f} - {results_df['cell_volume_cy'].max():.0f} CY",
-                    help="Range of cell volumes analyzed"
-                )
+                if len(zero_idle_configs) > 0:
+                    best = zero_idle_configs.iloc[0]
+                    st.metric(
+                        "🏆 Best Configuration",
+                        f"{int(best['num_cells'])} × {int(best['cell_volume_cy'])} CY",
+                        help="Fewest cells with zero idle days"
+                    )
+                else:
+                    best = results_df.iloc[0]
+                    st.metric(
+                        "Best Available",
+                        f"{int(best['num_cells'])} × {int(best['cell_volume_cy'])} CY",
+                        f"{int(best['idle_days'])} idle days"
+                    )
             
             with col2:
                 st.metric(
-                    "Number of Cells",
-                    f"{results_df['num_cells'].min():.0f} - {results_df['num_cells'].max():.0f}",
-                    help="Range of cells needed across configurations"
+                    "Cell Range",
+                    f"{results_df['num_cells'].min():.0f} - {results_df['num_cells'].max():.0f} cells",
+                    help="Range of cell counts analyzed"
                 )
             
             with col3:
                 st.metric(
-                    "Equipment Utilization",
-                    f"{results_df['equipment_utilization'].min()*100:.0f}% - {results_df['equipment_utilization'].max()*100:.0f}%",
-                    help="Range of equipment productivity"
+                    "Size Range",
+                    f"{results_df['cell_volume_cy'].min():.0f} - {results_df['cell_volume_cy'].max():.0f} CY",
+                    help="Range of cell volumes analyzed"
                 )
             
             with col4:
-                st.metric(
-                    "Facility Utilization",
-                    f"{results_df['utilization'].min()*100:.0f}% - {results_df['utilization'].max()*100:.0f}%",
-                    help="Range of capacity utilization"
-                )
+                if len(zero_idle_configs) > 0:
+                    st.metric(
+                        "Zero-Idle Options",
+                        f"{len(zero_idle_configs)} configs",
+                        help="Configurations that never turn away work"
+                    )
+                else:
+                    st.metric(
+                        "Min Idle Days",
+                        f"{results_df['idle_days'].min():.0f} days",
+                        help="Fewest idle days found"
+                    )
             
             # Configuration Matrix
-            st.subheader("🔍 Configuration Options Matrix")
-            st.markdown("**Compare all viable configurations. Click a row to select it for schedule generation.**")
+            st.subheader("🔍 Configuration Matrix")
+            st.markdown("""
+            **Configurations sorted by priority:**
+            1. Zero idle days (continuous operation)
+            2. Fewest cells
+            3. Smallest cell size
+            """)
             
-            # Prepare display dataframe with color coding
+            # Prepare display dataframe
             display_df = results_df.copy()
             
             # Format columns for display
@@ -805,35 +991,40 @@ def main():
             display_df['Total Capacity (CY)'] = display_df['total_capacity_cy'].astype(int)
             display_df['Load Days'] = display_df['load_days'].astype(int)
             display_df['Cycle Days'] = display_df['cycle_days'].astype(int)
-            display_df['Days Buffer'] = display_df['days_of_capacity'].round(1)
-            display_df['Facility Util %'] = (display_df['utilization'] * 100).round(1)
-            display_df['Equipment Util %'] = (display_df['equipment_utilization'] * 100).round(1)
-            display_df['Score'] = display_df['score'].round(0).astype(int)
-            
-            # Create selection column
-            display_df.insert(0, 'Select', False)
+            display_df['Idle Days'] = display_df['idle_days'].astype(int)
+            display_df['Max Daily (CY)'] = display_df['max_daily_volume'].astype(int)
+            display_df['Buffer %'] = display_df['buffer_pct'].round(0).astype(int)
             
             # Display columns
             display_cols = [
                 'Cell Size (CY)', 'Cells', 'Total Capacity (CY)', 
-                'Load Days', 'Cycle Days', 'Days Buffer',
-                'Facility Util %', 'Equipment Util %', 'Score'
+                'Load Days', 'Cycle Days', 'Idle Days', 'Max Daily (CY)', 'Buffer %'
             ]
             
-            # Color coding helper
-            def color_utilization(val, thresholds=(70, 85)):
-                """Color code utilization values"""
-                if val >= thresholds[1]:
+            # Color coding for idle days and buffer
+            def color_idle_days(val):
+                """Color code idle days - green for zero, red for any"""
+                if val == 0:
                     return 'background-color: #90EE90'  # Light green
-                elif val >= thresholds[0]:
-                    return 'background-color: #FFFFE0'  # Light yellow
                 else:
                     return 'background-color: #FFB6C1'  # Light red
             
+            def color_buffer(val):
+                """Color code buffer % - green for positive, red for negative"""
+                if val >= 50:
+                    return 'background-color: #90EE90'  # Light green - excellent headroom
+                elif val >= 0:
+                    return 'background-color: #FFFFE0'  # Light yellow - some headroom
+                else:
+                    return 'background-color: #FFB6C1'  # Light red - can't handle volume
+            
             # Apply styling
             styled_df = display_df[display_cols].style.applymap(
-                color_utilization,
-                subset=['Facility Util %', 'Equipment Util %']
+                color_idle_days,
+                subset=['Idle Days']
+            ).applymap(
+                color_buffer,
+                subset=['Buffer %']
             )
             
             # Display the table
@@ -854,17 +1045,17 @@ def main():
                 selected_index = st.selectbox(
                     "Choose a configuration to generate detailed schedule:",
                     options=range(len(results_df)),
-                    format_func=lambda x: f"Config {x+1}: {results_df.iloc[x]['cell_volume_cy']:.0f} CY × {results_df.iloc[x]['num_cells']:.0f} cells (Equip Util: {results_df.iloc[x]['equipment_utilization']*100:.1f}%)",
+                    format_func=lambda x: f"Config {x+1}: {int(results_df.iloc[x]['num_cells'])} × {int(results_df.iloc[x]['cell_volume_cy'])} CY ({int(results_df.iloc[x]['idle_days'])} idle days)",
                     key="config_selector"
                 )
                 st.session_state.selected_config_index = selected_index
             
             with col2:
-                st.metric(
-                    "Selected Config",
-                    f"#{selected_index + 1}",
-                    help="Configuration number selected"
-                )
+                idle = results_df.iloc[selected_index]['idle_days']
+                if idle == 0:
+                    st.success("✅ Continuous Operation")
+                else:
+                    st.warning(f"⚠️ {int(idle)} Idle Days")
             
             # Display selected configuration details
             selected_config = results_df.iloc[selected_index]
@@ -874,19 +1065,29 @@ def main():
             
             with detail_col1:
                 st.metric("Cell Size", f"{selected_config['cell_volume_cy']:.0f} CY")
-                st.metric("Number of Cells", f"{selected_config['num_cells']:.0f}")
+                st.metric("Number of Cells", f"{int(selected_config['num_cells'])}")
             
             with detail_col2:
-                st.metric("Loading Time", f"{selected_config['load_days']:.0f} days")
+                st.metric("Total Capacity", f"{selected_config['total_capacity_cy']:.0f} CY")
                 st.metric("Full Cycle", f"{selected_config['cycle_days']:.0f} days")
             
             with detail_col3:
-                st.metric("Facility Utilization", f"{selected_config['utilization']*100:.1f}%")
-                st.metric("Equipment Utilization", f"{selected_config['equipment_utilization']*100:.1f}%")
+                st.metric("Max Daily Volume", f"{int(selected_config['max_daily_volume'])} CY/day",
+                         help="Maximum soil volume this config can receive daily while maintaining continuous operation")
+                buffer_pct = selected_config['buffer_pct']
+                if buffer_pct >= 0:
+                    st.metric("Buffer Capacity", f"+{buffer_pct:.0f}%",
+                             help="Headroom above your planned daily volume")
+                else:
+                    st.metric("Buffer Capacity", f"{buffer_pct:.0f}%",
+                             help="Cannot handle your planned daily volume")
             
             with detail_col4:
-                st.metric("Total Capacity", f"{selected_config['total_capacity_cy']:.0f} CY")
-                st.metric("Days of Buffer", f"{selected_config['days_of_capacity']:.1f} days")
+                st.metric("Idle Days", f"{int(selected_config['idle_days'])}")
+                if selected_config['idle_days'] == 0:
+                    st.success("✅ Continuous Operation")
+                else:
+                    st.warning(f"⚠️ Will turn away work")
                 
             
             # Cycle Time Breakdown for Selected Config
@@ -908,86 +1109,56 @@ def main():
             st.subheader("📊 Configuration Comparisons")
             
             # Create tabs for different visualizations
-            tab1, tab2, tab3, tab4 = st.tabs(["Cell Size vs Number", "Utilization Analysis", "Equipment Utilization", "Cycle Time"])
+            tab1, tab2, tab3 = st.tabs(["Cell Size vs Cells", "Idle Days Analysis", "Cycle Time"])
             
             with tab1:
                 fig1 = px.scatter(
-                    results_df.head(20),
+                    results_df,
                     x='cell_volume_cy',
                     y='num_cells',
-                    size='utilization',
-                    color='load_days',
-                    hover_data=['cycle_days', 'equipment_utilization'],
+                    color='idle_days',
+                    hover_data=['cycle_days', 'total_capacity_cy', 'idle_days'],
                     labels={
                         'cell_volume_cy': 'Cell Size (CY)',
                         'num_cells': 'Number of Cells',
-                        'load_days': 'Loading Days',
-                        'utilization': 'Facility Utilization',
-                        'equipment_utilization': 'Equipment Utilization'
+                        'idle_days': 'Idle Days',
+                        'total_capacity_cy': 'Total Capacity'
                     },
-                    title='Cell Size vs Number of Cells Required',
-                    color_continuous_scale='Viridis'
+                    title='Cell Size vs Number of Cells (color = Idle Days)',
+                    color_continuous_scale='RdYlGn_r'  # Red=bad (high idle), Green=good (zero)
                 )
-                fig1.update_traces(marker=dict(line=dict(width=1, color='DarkSlateGrey')))
+                fig1.update_traces(marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
                 st.plotly_chart(fig1, use_container_width=True)
             
             with tab2:
-                fig2 = px.scatter(
-                    results_df.head(20),
-                    x='cell_volume_cy',
-                    y='utilization',
-                    size='num_cells',
-                    color='num_cells',
-                    hover_data=['load_days', 'cycle_days', 'equipment_utilization'],
+                # Filter to show configs with various idle day counts
+                fig2 = px.bar(
+                    results_df.groupby('num_cells').agg({
+                        'idle_days': 'min',
+                        'cell_volume_cy': 'min'
+                    }).reset_index(),
+                    x='num_cells',
+                    y='idle_days',
+                    color='idle_days',
                     labels={
-                        'cell_volume_cy': 'Cell Size (CY)',
-                        'utilization': 'Facility Utilization',
                         'num_cells': 'Number of Cells',
-                        'equipment_utilization': 'Equipment Utilization'
+                        'idle_days': 'Minimum Idle Days',
                     },
-                    title='Facility Utilization by Configuration',
-                    color_continuous_scale='RdYlGn'
+                    title='Minimum Idle Days by Cell Count',
+                    color_continuous_scale='RdYlGn_r'
                 )
-                fig2.add_hline(y=0.85, line_dash="dash", line_color="red", 
-                              annotation_text="85% Target")
+                fig2.add_hline(y=0, line_dash="dash", line_color="green", annotation_text="Zero Idle = Continuous Operation")
                 st.plotly_chart(fig2, use_container_width=True)
-            
-            with tab3:
-                # Equipment utilization analysis
-                fig3 = px.scatter(
-                    results_df.head(20),
-                    x='cell_volume_cy',
-                    y='equipment_utilization',
-                    size='num_cells',
-                    color='load_days',
-                    hover_data=['num_cells', 'cycle_days', 'utilization', 'cell_start_interval'],
-                    labels={
-                        'cell_volume_cy': 'Cell Size (CY)',
-                        'equipment_utilization': 'Equipment Utilization',
-                        'num_cells': 'Number of Cells',
-                        'load_days': 'Loading Days',
-                        'cell_start_interval': 'Cell Start Interval (days)'
-                    },
-                    title='Equipment Utilization by Configuration (Higher = Less Idle Time)',
-                    color_continuous_scale='Blues'
-                )
-                fig3.add_hline(y=0.75, line_dash="dash", line_color="green", 
-                              annotation_text="75% Good Target")
-                fig3.add_hline(y=0.85, line_dash="dash", line_color="darkgreen", 
-                              annotation_text="85% Excellent")
-                st.plotly_chart(fig3, use_container_width=True)
                 
                 st.info("""
-                **Understanding Equipment Utilization:**
-                - **85%+**: Excellent - Equipment stays consistently busy with minimal idle time
-                - **75-85%**: Good - Solid balance between productivity and flexibility
-                - **60-75%**: Fair - Some idle days, consider adding cells for better utilization
-                - **<60%**: Poor - Equipment frequently idle, strongly consider more/smaller cells
+                **Understanding Idle Days:**
+                - **0 idle days**: ✅ Continuous operation - never turn away work
+                - **1+ idle days**: ⚠️ Some days you can't accept incoming soil
                 
-                Higher utilization = loaders/excavators work more days = better ROI on equipment costs
+                Goal: Find the fewest cells that achieve zero idle days.
                 """)
             
-            with tab4:
+            with tab3:
                 # Cycle time breakdown for selected config
                 cycle_breakdown = {
                     'Phase': ['Load', 'Rip', 'Treat', 'Dry', 'Unload'],
