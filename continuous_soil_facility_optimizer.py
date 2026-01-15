@@ -194,11 +194,11 @@ def calculate_cells_needed(daily_volume, cell_volume, cycle_days, buffer_factor=
     }
 
 
-def optimize_cell_configuration(daily_volume_cy, depth_ft, daily_load_capacity,
+def optimize_cell_configuration(daily_volume_cy, daily_load_capacity,
                                 daily_unload_capacity, phase_params, weekend_params,
                                 max_loading_days=14, min_cell_volume=100, 
                                 max_cell_volume=5000, step_size=50):
-    """Find optimal cell configuration across a range of cell sizes"""
+    """Find all viable cell configurations"""
     
     results = []
     
@@ -235,9 +235,6 @@ def optimize_cell_configuration(daily_volume_cy, depth_ft, daily_load_capacity,
             cell_volume,
             cycle_info['total_calendar_days']
         )
-        
-        # Calculate dimensions
-        dimensions = calculate_cell_dimensions(cell_volume, depth_ft)
         
         # Calculate capacity metrics
         total_facility_capacity = cell_volume * cells_info['min_cells_with_buffer']
@@ -291,10 +288,6 @@ def optimize_cell_configuration(daily_volume_cy, depth_ft, daily_load_capacity,
         results.append({
             'cell_volume_cy': cell_volume,
             'num_cells': cells_info['min_cells_with_buffer'],
-            'length_ft': dimensions['Length_ft'],
-            'width_ft': dimensions['Width_ft'],
-            'depth_ft': dimensions['Depth_ft'],
-            'area_sf': dimensions['Area_SF'],
             'load_days': cycle_info['load_calendar_days'],
             'cycle_days': cycle_info['total_calendar_days'],
             'total_capacity_cy': total_facility_capacity,
@@ -489,8 +482,8 @@ def main():
         st.session_state.optimization_run = False
     if 'results_df' not in st.session_state:
         st.session_state.results_df = None
-    if 'optimal_config' not in st.session_state:
-        st.session_state.optimal_config = None
+    if 'selected_config_index' not in st.session_state:
+        st.session_state.selected_config_index = None
     if 'parameters' not in st.session_state:
         st.session_state.parameters = {}
     if 'schedule_generated' not in st.session_state:
@@ -514,18 +507,6 @@ def main():
             step=10,
             help="Average daily volume of soil arriving at facility"
         )
-        
-        # Cell Depth
-        st.subheader("Cell Design")
-        cell_depth_inches = st.number_input(
-            "Treatment Cell Depth (inches)",
-            min_value=12,
-            max_value=240,
-            value=36,
-            step=6,
-            help="Desired depth for treatment cells"
-        )
-        cell_depth = cell_depth_inches / 12.0  # Convert to feet for calculations
         
         # Equipment Capacity
         st.subheader("Equipment Capacity")
@@ -638,7 +619,6 @@ def main():
             # Run optimization
             results_df = optimize_cell_configuration(
                 daily_volume,
-                cell_depth,
                 daily_load_capacity,
                 daily_unload_capacity,
                 phase_params,
@@ -651,7 +631,7 @@ def main():
             
             # Store in session state
             st.session_state.results_df = results_df
-            st.session_state.optimal_config = results_df.iloc[0] if results_df is not None and len(results_df) > 0 else None
+            st.session_state.selected_config_index = 0 if results_df is not None and len(results_df) > 0 else None
             st.session_state.optimization_run = True
             # Clear any previous schedule when new optimization runs
             st.session_state.schedule_generated = False
@@ -659,8 +639,6 @@ def main():
             st.session_state.schedule_start = None
             st.session_state.parameters = {
                 'daily_volume': daily_volume,
-                'cell_depth': cell_depth,
-                'cell_depth_inches': cell_depth * 12,
                 'daily_load_capacity': daily_load_capacity,
                 'daily_unload_capacity': daily_unload_capacity,
                 'phase_params': phase_params,
@@ -673,11 +651,9 @@ def main():
     # Display results if optimization has been run
     if st.session_state.optimization_run and st.session_state.results_df is not None:
         results_df = st.session_state.results_df
-        optimal = st.session_state.optimal_config
         
         # Retrieve parameters
         daily_volume = st.session_state.parameters['daily_volume']
-        cell_depth = st.session_state.parameters['cell_depth']
         daily_load_capacity = st.session_state.parameters['daily_load_capacity']
         daily_unload_capacity = st.session_state.parameters['daily_unload_capacity']
         phase_params = st.session_state.parameters['phase_params']
@@ -690,376 +666,348 @@ def main():
             st.error("❌ No valid configurations found. Try adjusting constraints.")
             st.info("Suggestions: Increase max cell size, increase loading capacity, or increase max loading days")
         else:
-                # Display optimal configuration
-                st.success("✅ Optimization Complete")
+            st.success(f"✅ Found {len(results_df)} viable configurations")
+            
+            # Summary stats
+            st.subheader("📊 Configuration Range Summary")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Cell Sizes",
+                    f"{results_df['cell_volume_cy'].min():.0f} - {results_df['cell_volume_cy'].max():.0f} CY",
+                    help="Range of cell volumes analyzed"
+                )
+            
+            with col2:
+                st.metric(
+                    "Number of Cells",
+                    f"{results_df['num_cells'].min():.0f} - {results_df['num_cells'].max():.0f}",
+                    help="Range of cells needed across configurations"
+                )
+            
+            with col3:
+                st.metric(
+                    "Equipment Utilization",
+                    f"{results_df['equipment_utilization'].min()*100:.0f}% - {results_df['equipment_utilization'].max()*100:.0f}%",
+                    help="Range of equipment productivity"
+                )
+            
+            with col4:
+                st.metric(
+                    "Facility Utilization",
+                    f"{results_df['utilization'].min()*100:.0f}% - {results_df['utilization'].max()*100:.0f}%",
+                    help="Range of capacity utilization"
+                )
+            
+            # Configuration Matrix
+            st.subheader("🔍 Configuration Options Matrix")
+            st.markdown("**Compare all viable configurations. Click a row to select it for schedule generation.**")
+            
+            # Prepare display dataframe with color coding
+            display_df = results_df.copy()
+            
+            # Format columns for display
+            display_df['Cell Size (CY)'] = display_df['cell_volume_cy'].astype(int)
+            display_df['Cells'] = display_df['num_cells'].astype(int)
+            display_df['Total Capacity (CY)'] = display_df['total_capacity_cy'].astype(int)
+            display_df['Load Days'] = display_df['load_days'].astype(int)
+            display_df['Cycle Days'] = display_df['cycle_days'].astype(int)
+            display_df['Days Buffer'] = display_df['days_of_capacity'].round(1)
+            display_df['Facility Util %'] = (display_df['utilization'] * 100).round(1)
+            display_df['Equipment Util %'] = (display_df['equipment_utilization'] * 100).round(1)
+            display_df['Score'] = display_df['score'].round(0).astype(int)
+            
+            # Create selection column
+            display_df.insert(0, 'Select', False)
+            
+            # Display columns
+            display_cols = [
+                'Cell Size (CY)', 'Cells', 'Total Capacity (CY)', 
+                'Load Days', 'Cycle Days', 'Days Buffer',
+                'Facility Util %', 'Equipment Util %', 'Score'
+            ]
+            
+            # Color coding helper
+            def color_utilization(val, thresholds=(70, 85)):
+                """Color code utilization values"""
+                if val >= thresholds[1]:
+                    return 'background-color: #90EE90'  # Light green
+                elif val >= thresholds[0]:
+                    return 'background-color: #FFFFE0'  # Light yellow
+                else:
+                    return 'background-color: #FFB6C1'  # Light red
+            
+            # Apply styling
+            styled_df = display_df[display_cols].style.applymap(
+                color_utilization,
+                subset=['Facility Util %', 'Equipment Util %']
+            )
+            
+            # Display the table
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, len(display_df) * 35 + 38)
+            )
+            
+            # Row selection for schedule generation
+            st.markdown("---")
+            st.subheader("📋 Select Configuration for Schedule")
+            
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                selected_index = st.selectbox(
+                    "Choose a configuration to generate detailed schedule:",
+                    options=range(len(results_df)),
+                    format_func=lambda x: f"Config {x+1}: {results_df.iloc[x]['cell_volume_cy']:.0f} CY × {results_df.iloc[x]['num_cells']:.0f} cells (Equip Util: {results_df.iloc[x]['equipment_utilization']*100:.1f}%)",
+                    key="config_selector"
+                )
+                st.session_state.selected_config_index = selected_index
+            
+            with col2:
+                st.metric(
+                    "Selected Config",
+                    f"#{selected_index + 1}",
+                    help="Configuration number selected"
+                )
+            
+            # Display selected configuration details
+            selected_config = results_df.iloc[selected_index]
+            
+            st.markdown("**Selected Configuration Details:**")
+            detail_col1, detail_col2, detail_col3, detail_col4 = st.columns(4)
+            
+            with detail_col1:
+                st.metric("Cell Size", f"{selected_config['cell_volume_cy']:.0f} CY")
+                st.metric("Number of Cells", f"{selected_config['num_cells']:.0f}")
+            
+            with detail_col2:
+                st.metric("Loading Time", f"{selected_config['load_days']:.0f} days")
+                st.metric("Full Cycle", f"{selected_config['cycle_days']:.0f} days")
+            
+            with detail_col3:
+                st.metric("Facility Utilization", f"{selected_config['utilization']*100:.1f}%")
+                st.metric("Equipment Utilization", f"{selected_config['equipment_utilization']*100:.1f}%")
+            
+            with detail_col4:
+                st.metric("Total Capacity", f"{selected_config['total_capacity_cy']:.0f} CY")
+                st.metric("Days of Buffer", f"{selected_config['days_of_capacity']:.1f} days")
                 
-                optimal = results_df.iloc[0]
+            
+            # Cycle Time Breakdown for Selected Config
+            st.markdown("**Cycle Time Breakdown (Selected Configuration):**")
+            cycle_data = {
+                'Phase': ['Loading', 'Rip', 'Treatment', 'Drying', 'Unloading', 'TOTAL'],
+                'Calendar Days': [
+                    selected_config['cycle_breakdown']['load_calendar_days'],
+                    selected_config['cycle_breakdown']['rip_calendar_days'],
+                    selected_config['cycle_breakdown']['treat_calendar_days'],
+                    selected_config['cycle_breakdown']['dry_calendar_days'],
+                    selected_config['cycle_breakdown']['unload_calendar_days'],
+                    selected_config['cycle_days']
+                ]
+            }
+            st.dataframe(pd.DataFrame(cycle_data), hide_index=True, use_container_width=True)
+            
+            # Visualizations
+            st.subheader("📊 Configuration Comparisons")
+            
+            # Create tabs for different visualizations
+            tab1, tab2, tab3, tab4 = st.tabs(["Cell Size vs Number", "Utilization Analysis", "Equipment Utilization", "Cycle Time"])
+            
+            with tab1:
+                fig1 = px.scatter(
+                    results_df.head(20),
+                    x='cell_volume_cy',
+                    y='num_cells',
+                    size='utilization',
+                    color='load_days',
+                    hover_data=['cycle_days', 'equipment_utilization'],
+                    labels={
+                        'cell_volume_cy': 'Cell Size (CY)',
+                        'num_cells': 'Number of Cells',
+                        'load_days': 'Loading Days',
+                        'utilization': 'Facility Utilization',
+                        'equipment_utilization': 'Equipment Utilization'
+                    },
+                    title='Cell Size vs Number of Cells Required',
+                    color_continuous_scale='Viridis'
+                )
+                fig1.update_traces(marker=dict(line=dict(width=1, color='DarkSlateGrey')))
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with tab2:
+                fig2 = px.scatter(
+                    results_df.head(20),
+                    x='cell_volume_cy',
+                    y='utilization',
+                    size='num_cells',
+                    color='num_cells',
+                    hover_data=['load_days', 'cycle_days', 'equipment_utilization'],
+                    labels={
+                        'cell_volume_cy': 'Cell Size (CY)',
+                        'utilization': 'Facility Utilization',
+                        'num_cells': 'Number of Cells',
+                        'equipment_utilization': 'Equipment Utilization'
+                    },
+                    title='Facility Utilization by Configuration',
+                    color_continuous_scale='RdYlGn'
+                )
+                fig2.add_hline(y=0.85, line_dash="dash", line_color="red", 
+                              annotation_text="85% Target")
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            with tab3:
+                # Equipment utilization analysis
+                fig3 = px.scatter(
+                    results_df.head(20),
+                    x='cell_volume_cy',
+                    y='equipment_utilization',
+                    size='num_cells',
+                    color='load_days',
+                    hover_data=['num_cells', 'cycle_days', 'utilization', 'cell_start_interval'],
+                    labels={
+                        'cell_volume_cy': 'Cell Size (CY)',
+                        'equipment_utilization': 'Equipment Utilization',
+                        'num_cells': 'Number of Cells',
+                        'load_days': 'Loading Days',
+                        'cell_start_interval': 'Cell Start Interval (days)'
+                    },
+                    title='Equipment Utilization by Configuration (Higher = Less Idle Time)',
+                    color_continuous_scale='Blues'
+                )
+                fig3.add_hline(y=0.75, line_dash="dash", line_color="green", 
+                              annotation_text="75% Good Target")
+                fig3.add_hline(y=0.85, line_dash="dash", line_color="darkgreen", 
+                              annotation_text="85% Excellent")
+                st.plotly_chart(fig3, use_container_width=True)
                 
-                col1, col2, col3, col4, col5 = st.columns(5)
+                st.info("""
+                **Understanding Equipment Utilization:**
+                - **85%+**: Excellent - Equipment stays consistently busy with minimal idle time
+                - **75-85%**: Good - Solid balance between productivity and flexibility
+                - **60-75%**: Fair - Some idle days, consider adding cells for better utilization
+                - **<60%**: Poor - Equipment frequently idle, strongly consider more/smaller cells
                 
-                with col1:
-                    st.metric(
-                        "Optimal Cell Size",
-                        f"{optimal['cell_volume_cy']:.0f} CY",
-                        help="Recommended cell capacity"
-                    )
-                
-                with col2:
-                    st.metric(
-                        "Number of Cells",
-                        f"{optimal['num_cells']:.0f}",
-                        help="Minimum cells needed for continuous operation"
-                    )
-                
-                with col3:
-                    st.metric(
-                        "Cell Dimensions",
-                        f"{optimal['length_ft']:.1f}' × {optimal['width_ft']:.1f}'",
-                        help=f"Length × Width (at {optimal['depth_ft']:.1f}' depth)"
-                    )
-                
-                with col4:
-                    st.metric(
-                        "Facility Utilization",
-                        f"{optimal['utilization']*100:.1f}%",
-                        help="Facility capacity utilization rate"
-                    )
-                
-                with col5:
-                    equipment_color = "normal"
-                    if optimal['equipment_utilization'] >= 0.85:
-                        equipment_color = "normal"
-                    elif optimal['equipment_utilization'] >= 0.70:
-                        equipment_color = "normal"
-                    else:
-                        equipment_color = "inverse"
-                    
-                    st.metric(
-                        "Equipment Utilization",
-                        f"{optimal['equipment_utilization']*100:.1f}%",
-                        help="Loader/excavator daily work utilization (higher = less idle time)",
-                        delta=f"{'Good' if optimal['equipment_utilization'] >= 0.75 else 'Consider more cells'}" if optimal['equipment_utilization'] < 0.75 else None
-                    )
-                
-                # Detailed breakdown
-                st.subheader("📊 Optimal Configuration Details")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("**Cell Specifications**")
-                    specs_data = {
-                        'Parameter': [
-                            'Cell Volume',
-                            'Cell Length',
-                            'Cell Width',
-                            'Cell Depth',
-                            'Cell Area',
-                            'Aspect Ratio',
-                            'Number of Cells',
-                            'Total Facility Capacity'
-                        ],
-                        'Value': [
-                            f"{optimal['cell_volume_cy']:.0f} CY",
-                            f"{optimal['length_ft']:.1f} ft",
-                            f"{optimal['width_ft']:.1f} ft",
-                            f"{optimal['depth_ft']:.1f} ft",
-                            f"{optimal['area_sf']:.0f} sq ft",
-                            "2:1 (L:W)",
-                            f"{optimal['num_cells']:.0f}",
-                            f"{optimal['total_capacity_cy']:.0f} CY"
-                        ]
-                    }
-                    st.dataframe(pd.DataFrame(specs_data), hide_index=True, use_container_width=True)
-                
-                with col2:
-                    st.markdown("**Cycle Time Breakdown**")
-                    cycle_data = {
-                        'Phase': [
-                            'Loading',
-                            'Rip',
-                            'Treatment',
-                            'Drying',
-                            'Unloading',
-                            'TOTAL CYCLE'
-                        ],
-                        'Calendar Days': [
-                            optimal['cycle_breakdown']['load_calendar_days'],
-                            optimal['cycle_breakdown']['rip_calendar_days'],
-                            optimal['cycle_breakdown']['treat_calendar_days'],
-                            optimal['cycle_breakdown']['dry_calendar_days'],
-                            optimal['cycle_breakdown']['unload_calendar_days'],
-                            optimal['cycle_days']
-                        ]
-                    }
-                    st.dataframe(pd.DataFrame(cycle_data), hide_index=True, use_container_width=True)
-                
-                # Equipment Utilization Details
-                st.markdown("**Equipment Utilization Analysis**")
-                st.info(f"""
-                **Equipment stays busy!** With {optimal['num_cells']:.0f} cells operating on staggered schedules:
-                - **Loading Equipment Utilization**: {optimal['load_equipment_util']*100:.1f}% - Loaders will be actively loading cells this much of the time
-                - **Unloading Equipment Utilization**: {optimal['unload_equipment_util']*100:.1f}% - Excavators will be actively unloading cells this much of the time
-                - **Combined Equipment Utilization**: {optimal['equipment_utilization']*100:.1f}% - Overall equipment productivity
-                - **Cell Start Interval**: Every {optimal['cell_start_interval']:.1f} days a new cell begins its cycle
-                - **Daily Work Consistency**: {optimal['load_consistency']*100:.1f}% - How consistently loaders work at capacity each day
-                
-                {'✅ **Excellent!** Equipment will stay consistently busy with minimal idle time.' if optimal['equipment_utilization'] >= 0.85 else '⚠️ **Consider adding more cells** to improve daily equipment utilization and reduce idle time.' if optimal['equipment_utilization'] < 0.70 else '✓ **Good balance** between equipment utilization and capital costs.'}
+                Higher utilization = loaders/excavators work more days = better ROI on equipment costs
                 """)
-                
-                # Performance metrics
-                st.subheader("📈 Performance Metrics")
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.metric(
-                        "Days of Capacity",
-                        f"{optimal['days_of_capacity']:.1f} days",
-                        help="How many days of incoming volume the facility can hold"
-                    )
-                
-                with col2:
-                    st.metric(
-                        "Daily Throughput",
-                        f"{optimal['daily_throughput']:.0f} CY/day",
-                        help="Maximum average daily processing capacity"
-                    )
-                
-                with col3:
-                    surplus = optimal['daily_throughput'] - daily_volume
-                    st.metric(
-                        "Capacity Surplus",
-                        f"{surplus:.0f} CY/day",
-                        help="Extra capacity beyond daily incoming volume",
-                        delta=f"{(surplus/daily_volume)*100:.1f}%"
-                    )
-                
-                # Alternative configurations
-                st.subheader("🔄 Alternative Configurations")
-                st.markdown("Top 10 alternative configurations ranked by optimization score (balances capital cost, facility utilization, and equipment productivity)")
-                
-                display_df = results_df.head(10).copy()
-                display_df['Cell Size (CY)'] = display_df['cell_volume_cy'].astype(int)
-                display_df['Cells'] = display_df['num_cells'].astype(int)
-                display_df['Dimensions (L×W)'] = display_df.apply(
-                    lambda x: f"{x['length_ft']:.1f}' × {x['width_ft']:.1f}'", axis=1
-                )
-                display_df['Load Days'] = display_df['load_days'].astype(int)
-                display_df['Cycle Days'] = display_df['cycle_days'].astype(int)
-                display_df['Facility Util'] = (display_df['utilization'] * 100).round(1).astype(str) + '%'
-                display_df['Equipment Util'] = (display_df['equipment_utilization'] * 100).round(1).astype(str) + '%'
-                display_df['Total Capacity (CY)'] = display_df['total_capacity_cy'].astype(int)
-                
-                st.dataframe(
-                    display_df[[
-                        'Cell Size (CY)', 'Cells', 'Dimensions (L×W)', 
-                        'Load Days', 'Cycle Days', 'Facility Util', 'Equipment Util', 'Total Capacity (CY)'
-                    ]],
-                    hide_index=True,
-                    use_container_width=True
-                )
-                
-                # Visualizations
-                st.subheader("📊 Configuration Analysis")
-                
-                # Create tabs for different visualizations
-                tab1, tab2, tab3, tab4 = st.tabs(["Cell Size vs Number", "Utilization Analysis", "Equipment Utilization", "Cycle Time"])
-                
-                with tab1:
-                    fig1 = px.scatter(
-                        results_df.head(20),
-                        x='cell_volume_cy',
-                        y='num_cells',
-                        size='utilization',
-                        color='load_days',
-                        hover_data=['cycle_days', 'equipment_utilization'],
-                        labels={
-                            'cell_volume_cy': 'Cell Size (CY)',
-                            'num_cells': 'Number of Cells',
-                            'load_days': 'Loading Days',
-                            'utilization': 'Facility Utilization',
-                            'equipment_utilization': 'Equipment Utilization'
-                        },
-                        title='Cell Size vs Number of Cells Required',
-                        color_continuous_scale='Viridis'
-                    )
-                    fig1.update_traces(marker=dict(line=dict(width=1, color='DarkSlateGrey')))
-                    st.plotly_chart(fig1, use_container_width=True)
-                
-                with tab2:
-                    fig2 = px.scatter(
-                        results_df.head(20),
-                        x='cell_volume_cy',
-                        y='utilization',
-                        size='num_cells',
-                        color='num_cells',
-                        hover_data=['load_days', 'cycle_days', 'equipment_utilization'],
-                        labels={
-                            'cell_volume_cy': 'Cell Size (CY)',
-                            'utilization': 'Facility Utilization',
-                            'num_cells': 'Number of Cells',
-                            'equipment_utilization': 'Equipment Utilization'
-                        },
-                        title='Facility Utilization by Configuration',
-                        color_continuous_scale='RdYlGn'
-                    )
-                    fig2.add_hline(y=0.85, line_dash="dash", line_color="red", 
-                                  annotation_text="85% Target")
-                    st.plotly_chart(fig2, use_container_width=True)
-                
-                with tab3:
-                    # Equipment utilization analysis
-                    fig3 = px.scatter(
-                        results_df.head(20),
-                        x='cell_volume_cy',
-                        y='equipment_utilization',
-                        size='num_cells',
-                        color='load_days',
-                        hover_data=['num_cells', 'cycle_days', 'utilization', 'cell_start_interval'],
-                        labels={
-                            'cell_volume_cy': 'Cell Size (CY)',
-                            'equipment_utilization': 'Equipment Utilization',
-                            'num_cells': 'Number of Cells',
-                            'load_days': 'Loading Days',
-                            'cell_start_interval': 'Cell Start Interval (days)'
-                        },
-                        title='Equipment Utilization by Configuration (Higher = Less Idle Time)',
-                        color_continuous_scale='Blues'
-                    )
-                    fig3.add_hline(y=0.75, line_dash="dash", line_color="green", 
-                                  annotation_text="75% Good Target")
-                    fig3.add_hline(y=0.85, line_dash="dash", line_color="darkgreen", 
-                                  annotation_text="85% Excellent")
-                    st.plotly_chart(fig3, use_container_width=True)
-                    
-                    st.info("""
-                    **Understanding Equipment Utilization:**
-                    - **85%+**: Excellent - Equipment stays consistently busy with minimal idle time
-                    - **75-85%**: Good - Solid balance between productivity and flexibility
-                    - **60-75%**: Fair - Some idle days, consider adding cells for better utilization
-                    - **<60%**: Poor - Equipment frequently idle, strongly consider more/smaller cells
-                    
-                    Higher utilization = loaders/excavators work more days = better ROI on equipment costs
-                    """)
-                
-                with tab4:
-                    # Cycle time breakdown for optimal config
-                    cycle_breakdown = {
-                        'Phase': ['Load', 'Rip', 'Treat', 'Dry', 'Unload'],
-                        'Days': [
-                            optimal['cycle_breakdown']['load_calendar_days'],
-                            optimal['cycle_breakdown']['rip_calendar_days'],
-                            optimal['cycle_breakdown']['treat_calendar_days'],
-                            optimal['cycle_breakdown']['dry_calendar_days'],
-                            optimal['cycle_breakdown']['unload_calendar_days']
-                        ]
-                    }
-                    fig4 = px.bar(
-                        cycle_breakdown,
-                        x='Phase',
-                        y='Days',
-                        title='Cycle Time Breakdown (Optimal Configuration)',
-                        labels={'Days': 'Calendar Days'},
-                        color='Phase',
-                        color_discrete_sequence=px.colors.qualitative.Set2
-                    )
-                    st.plotly_chart(fig4, use_container_width=True)
-                
-                # Export options
-                st.subheader("💾 Export Results")
-                
-                col1, col2 = st.columns(2)
-                
-                # Prepare export data
-                export_df = results_df.copy()
-                export_df = export_df.round(2)
-                
-                # Add summary sheet
-                summary_data = {
-                    'Parameter': [
-                        'Daily Incoming Volume (CY)',
-                        'Cell Depth (inches)',
-                        'Daily Load Capacity (CY)',
-                        'Daily Unload Capacity (CY)',
-                        'Rip Duration (days)',
-                        'Treatment Duration (days)',
-                        'Drying Duration (days)',
-                        '',
-                        'OPTIMAL CONFIGURATION',
-                        'Recommended Cell Size (CY)',
-                        'Number of Cells',
-                        'Cell Length (ft)',
-                        'Cell Width (ft)',
-                        'Total Facility Capacity (CY)',
-                        'Cycle Time (days)',
-                        'Utilization (%)'
-                    ],
-                    'Value': [
-                        daily_volume,
-                        cell_depth * 12,  # Convert back to inches for display
-                        daily_load_capacity,
-                        daily_unload_capacity,
-                        rip_days,
-                        treat_days,
-                        dry_days,
-                        '',
-                        '',
-                        optimal['cell_volume_cy'],
-                        optimal['num_cells'],
-                        f"{optimal['length_ft']:.1f}",
-                        f"{optimal['width_ft']:.1f}",
-                        optimal['total_capacity_cy'],
-                        optimal['cycle_days'],
-                        f"{optimal['utilization']*100:.1f}"
+            
+            with tab4:
+                # Cycle time breakdown for selected config
+                cycle_breakdown = {
+                    'Phase': ['Load', 'Rip', 'Treat', 'Dry', 'Unload'],
+                    'Days': [
+                        selected_config['cycle_breakdown']['load_calendar_days'],
+                        selected_config['cycle_breakdown']['rip_calendar_days'],
+                        selected_config['cycle_breakdown']['treat_calendar_days'],
+                        selected_config['cycle_breakdown']['dry_calendar_days'],
+                        selected_config['cycle_breakdown']['unload_calendar_days']
                     ]
                 }
-                summary_df = pd.DataFrame(summary_data)
-                
-                # Create Excel file
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    summary_df.to_excel(writer, sheet_name='Summary', index=False)
-                    export_df.to_excel(writer, sheet_name='All_Configurations', index=False)
-                
-                output.seek(0)
-                
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                excel_filename = f"facility_optimizer_{timestamp}.xlsx"
-                
-                with col1:
-                    st.download_button(
-                        label="📥 Download Configuration Analysis",
-                        data=output,
-                        file_name=excel_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                
-                with col2:
-                    csv_data = export_df.to_csv(index=False)
-                    st.download_button(
-                        label="📄 Download CSV",
-                        data=csv_data,
-                        file_name=f"configurations_{timestamp}.csv",
-                        mime="text/csv"
-                    )
-                
-                # Generate Treatment Schedule
-                st.markdown("---")
-                st.subheader("📅 Generate Treatment Schedule")
-                st.markdown("""
-                Generate a detailed day-by-day schedule showing how each treatment cell will operate
-                over time based on the optimal configuration.
-                """)
-                
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    schedule_start_date = st.date_input(
-                        "Schedule Start Date",
-                        value=datetime.now().date(),
-                        help="First day of facility operations",
-                        key="schedule_start_date_input"
-                    )
+                fig4 = px.bar(
+                    cycle_breakdown,
+                    x='Phase',
+                    y='Days',
+                    title='Cycle Time Breakdown (Selected Configuration)',
+                    labels={'Days': 'Calendar Days'},
+                    color='Phase',
+                    color_discrete_sequence=px.colors.qualitative.Set2
+                )
+                st.plotly_chart(fig4, use_container_width=True)
+            
+            # Export options
+            st.subheader("💾 Export Results")
+            
+            col1, col2 = st.columns(2)
+            
+            # Prepare export data
+            export_df = results_df.copy()
+            export_df = export_df.round(2)
+            
+            # Add summary sheet
+            summary_data = {
+                'Parameter': [
+                    'Daily Incoming Volume (CY)',
+                    'Daily Load Capacity (CY)',
+                    'Daily Unload Capacity (CY)',
+                    'Rip Duration (days)',
+                    'Treatment Duration (days)',
+                    'Drying Duration (days)',
+                    '',
+                    'SELECTED CONFIGURATION',
+                    'Cell Size (CY)',
+                    'Number of Cells',
+                    'Total Facility Capacity (CY)',
+                    'Cycle Time (days)',
+                    'Facility Utilization (%)',
+                    'Equipment Utilization (%)'
+                ],
+                'Value': [
+                    daily_volume,
+                    daily_load_capacity,
+                    daily_unload_capacity,
+                    rip_days,
+                    treat_days,
+                    dry_days,
+                    '',
+                    '',
+                    selected_config['cell_volume_cy'],
+                    selected_config['num_cells'],
+                    selected_config['total_capacity_cy'],
+                    selected_config['cycle_days'],
+                    f"{selected_config['utilization']*100:.1f}",
+                    f"{selected_config['equipment_utilization']*100:.1f}"
+                ]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            
+            # Create Excel file
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                export_df.to_excel(writer, sheet_name='All_Configurations', index=False)
+            
+            output.seek(0)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            excel_filename = f"facility_optimizer_{timestamp}.xlsx"
+            
+            with col1:
+                st.download_button(
+                    label="📥 Download Configuration Analysis",
+                    data=output,
+                    file_name=excel_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            with col2:
+                csv_data = export_df.to_csv(index=False)
+                st.download_button(
+                    label="📄 Download CSV",
+                    data=csv_data,
+                    file_name=f"configurations_{timestamp}.csv",
+                    mime="text/csv"
+                )
+            
+            # Generate Treatment Schedule
+            st.markdown("---")
+            st.subheader("📅 Generate Treatment Schedule")
+            st.markdown("""
+            Generate a detailed day-by-day schedule showing how each treatment cell will operate
+            over time based on the selected configuration.
+            """)
+            
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                schedule_start_date = st.date_input(
+                    "Schedule Start Date",
+                    value=datetime.now().date(),
+                    help="First day of facility operations",
+                    key="schedule_start_date_input"
+                )
                 
                 with col2:
                     schedule_days = st.number_input(
@@ -1080,7 +1028,7 @@ def main():
                             
                             # Generate schedule
                             schedule_df = simulate_facility_schedule(
-                                optimal,
+                                selected_config,
                                 daily_volume,
                                 daily_load_capacity,
                                 daily_unload_capacity,
@@ -1102,6 +1050,7 @@ def main():
                 if st.session_state.schedule_generated and st.session_state.schedule_df is not None:
                     schedule_df = st.session_state.schedule_df
                     schedule_start = st.session_state.schedule_start
+                    selected_config = results_df.iloc[st.session_state.selected_config_index]
                     
                     # Display preview
                     st.success("✅ Schedule Generated!")
@@ -1109,7 +1058,7 @@ def main():
                     
                     # Create display version
                     display_cols = ['Date', 'DayName']
-                    for i in range(1, int(optimal['num_cells']) + 1):
+                    for i in range(1, int(selected_config['num_cells']) + 1):
                         display_cols.append(f'Cell_{i}_Phase')
                     display_cols.extend(['SoilWaiting', 'CumSoilIn', 'CumSoilOut'])
                     
@@ -1142,8 +1091,8 @@ def main():
                                 'Value': [
                                     schedule_start.strftime('%Y-%m-%d'),
                                     len(schedule_df),
-                                    optimal['cell_volume_cy'],
-                                    int(optimal['num_cells']),
+                                    selected_config['cell_volume_cy'],
+                                    int(selected_config['num_cells']),
                                     daily_volume,
                                     schedule_df['CumSoilIn'].iloc[-1],
                                     schedule_df['CumSoilOut'].iloc[-1],
@@ -1258,26 +1207,28 @@ def main():
         
         1. **Analyzing Your Requirements**: Input your daily incoming soil volume and operational parameters
         2. **Calculating Cycle Times**: Determines how long each treatment cell takes to complete a full cycle
-        3. **Optimizing Configuration**: Finds the best balance between:
+        3. **Finding All Viable Configurations**: Generates a matrix of options balancing:
            - Number of cells (capital cost)
-           - Cell size (operational efficiency)
+           - Cell size (volume in CY)
            - Facility utilization (capacity management)
            - **Equipment utilization (keeping loaders/excavators busy daily)**
            - Loading time (operational constraints)
-        4. **Generating Schedules**: Creates detailed day-by-day treatment schedules showing cell operations
+        4. **You Choose**: Select the configuration that best fits your needs
+        5. **Generating Schedules**: Creates detailed day-by-day treatment schedules for your selected configuration
         
         ### Key Features
         
-        - **Configuration Optimization**: Recommends optimal cell size and number
-        - **Equipment Productivity**: Ensures loaders and excavators stay busy, not idle
-        - **Rectangular Cells**: Uses 2:1 length-to-width ratio for consistent design
+        - **Configuration Matrix**: Shows ALL viable options, not just one "optimal" recommendation
+        - **Comparison Tools**: Sort and filter by any metric - cell size, number, utilization, etc.
+        - **Equipment Productivity**: Tracks how often loaders and excavators stay busy
+        - **Color-Coded Utilization**: Green = good, yellow = fair, red = poor
         - **Weekend Scheduling**: Customizable work schedules by phase
         - **Detailed Schedules**: Day-by-day tracking of all cells with color-coded phases
-        - **Excel Export**: Formatted reports matching industry standards
+        - **Excel Export**: Formatted reports with all configurations and selected config details
         
         ### Why Equipment Utilization Matters
         
-        **Idle equipment = wasted money.** The optimizer heavily weighs equipment utilization because:
+        **Idle equipment = wasted money.** The analysis shows equipment utilization because:
         - Loaders and excavators are expensive assets (purchase or rental)
         - Operators are paid whether equipment is working or idle
         - Smaller, more numerous cells = more consistent daily work
@@ -1285,25 +1236,24 @@ def main():
         
         **Target**: 75-85%+ equipment utilization means your team works productively most days.
         
-        ### Key Considerations
+        ### Key Tradeoffs
         
         - **More cells** = Higher capital cost, BUT better equipment utilization and surge capacity
         - **Larger cells** = Fewer cells needed, BUT longer loading times and more equipment idle days
-        - **Optimal facility utilization** = 80-90% for capacity management
-        - **Optimal equipment utilization** = 75-85%+ to minimize idle time and maximize productivity
+        - **Facility utilization** = 80-90% is good for capacity management
+        - **Equipment utilization** = 75-85%+ minimizes idle time and maximizes productivity
         
         ### Workflow
         
         1. Set your daily incoming volume
-        2. Define your cell depth preference (in inches)
-        3. Configure equipment capacities
-        4. Set treatment phase durations
-        5. Define weekend working schedules
-        6. Run the optimization
-        7. Review recommendations (note equipment utilization!)
-        8. Compare alternatives
-        9. Generate detailed treatment schedule
-        10. Export formatted Excel reports
+        2. Configure equipment capacities
+        3. Set treatment phase durations
+        4. Define weekend working schedules
+        5. Run the analysis
+        6. **Review the configuration matrix** - all options shown
+        7. **Select your preferred configuration** - you decide what's best
+        8. Generate detailed treatment schedule for selected config
+        9. Export results and schedules
         """)
 
 
