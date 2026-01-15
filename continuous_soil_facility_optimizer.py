@@ -497,6 +497,8 @@ def main():
         st.session_state.schedule_generated = False
     if 'schedule_df' not in st.session_state:
         st.session_state.schedule_df = None
+    if 'schedule_start' not in st.session_state:
+        st.session_state.schedule_start = None
     
     # Sidebar for inputs
     with st.sidebar:
@@ -654,6 +656,7 @@ def main():
             # Clear any previous schedule when new optimization runs
             st.session_state.schedule_generated = False
             st.session_state.schedule_df = None
+            st.session_state.schedule_start = None
             st.session_state.parameters = {
                 'daily_volume': daily_volume,
                 'cell_depth': cell_depth,
@@ -1055,7 +1058,7 @@ def main():
                         "Schedule Start Date",
                         value=datetime.now().date(),
                         help="First day of facility operations",
-                        key="schedule_start_date"
+                        key="schedule_start_date_input"
                     )
                 
                 with col2:
@@ -1066,35 +1069,39 @@ def main():
                         value=90,
                         step=30,
                         help="Number of days to simulate",
-                        key="schedule_days_input"
+                        key="schedule_days_number"
                     )
                 
                 if st.button("📊 Generate Detailed Schedule", type="primary", key="generate_schedule_btn"):
-                    with st.spinner("Generating detailed treatment schedule..."):
-                        # Convert date to datetime
-                        schedule_start = datetime.combine(schedule_start_date, datetime.min.time())
-                        
-                        # Generate schedule
-                        schedule_df = simulate_facility_schedule(
-                            optimal,
-                            daily_volume,
-                            daily_load_capacity,
-                            daily_unload_capacity,
-                            phase_params,
-                            weekend_params,
-                            schedule_start,
-                            schedule_days
-                        )
-                        
-                        # Store in session state
-                        st.session_state.schedule_df = schedule_df
-                        st.session_state.schedule_generated = True
-                        st.session_state.schedule_start_date = schedule_start
+                    try:
+                        with st.spinner("Generating detailed treatment schedule..."):
+                            # Convert date to datetime
+                            schedule_start = datetime.combine(schedule_start_date, datetime.min.time())
+                            
+                            # Generate schedule
+                            schedule_df = simulate_facility_schedule(
+                                optimal,
+                                daily_volume,
+                                daily_load_capacity,
+                                daily_unload_capacity,
+                                phase_params,
+                                weekend_params,
+                                schedule_start,
+                                int(schedule_days)
+                            )
+                            
+                            # Store in session state
+                            st.session_state.schedule_df = schedule_df
+                            st.session_state.schedule_generated = True
+                            st.session_state.schedule_start = schedule_start
+                    except Exception as e:
+                        st.error(f"Error generating schedule: {str(e)}")
+                        st.error("Please try again or contact support if the issue persists.")
                 
                 # Display schedule if it has been generated
                 if st.session_state.schedule_generated and st.session_state.schedule_df is not None:
                     schedule_df = st.session_state.schedule_df
-                    schedule_start = st.session_state.schedule_start_date
+                    schedule_start = st.session_state.schedule_start
                     
                     # Display preview
                     st.success("✅ Schedule Generated!")
