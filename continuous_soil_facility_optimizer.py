@@ -248,9 +248,45 @@ def optimize_cell_configuration(daily_volume_cy, depth_ft, daily_load_capacity,
         daily_throughput = cell_volume / cycle_info['total_calendar_days']
         utilization = daily_volume_cy / (daily_throughput * cells_info['min_cells_with_buffer'])
         
-        # Score: prefer fewer cells, but penalize poor utilization
+        # Calculate equipment utilization
+        # With staggered cells, how often will loaders be working?
+        num_cells = cells_info['min_cells_with_buffer']
+        
+        # Best case: cells start at regular intervals = cycle_time / num_cells
+        cell_start_interval = cycle_info['total_calendar_days'] / num_cells
+        
+        # If we're loading every X days, and loading takes Y days, equipment utilization is Y/X
+        # But we want continuous daily work, so ideal is when loading_days >= start_interval
+        if cycle_info['load_workdays'] >= cell_start_interval:
+            # Overlapping loading periods - good for equipment utilization
+            equipment_utilization = min(1.0, cycle_info['load_workdays'] / max(1, cell_start_interval))
+        else:
+            # Gaps between loading periods - equipment sits idle
+            equipment_utilization = cycle_info['load_workdays'] / max(1, cell_start_interval)
+        
+        # Calculate daily work consistency
+        # Ideal: soil loaded per day ≈ daily incoming volume
+        avg_daily_load = cell_volume / cycle_info['load_calendar_days']
+        load_consistency = min(1.0, avg_daily_load / daily_volume_cy) if daily_volume_cy > 0 else 0
+        
+        # Calculate unload equipment utilization
+        if cycle_info['unload_workdays'] >= cell_start_interval:
+            unload_equipment_utilization = min(1.0, cycle_info['unload_workdays'] / max(1, cell_start_interval))
+        else:
+            unload_equipment_utilization = cycle_info['unload_workdays'] / max(1, cell_start_interval)
+        
+        # Combined equipment utilization (average of load and unload)
+        combined_equipment_util = (equipment_utilization + unload_equipment_utilization) / 2
+        
+        # Score: prefer fewer cells, good utilization, AND high equipment utilization
         # Lower score is better
-        score = cells_info['min_cells_with_buffer'] * 100 + (1 - utilization) * 1000
+        # Heavily penalize poor equipment utilization (idle equipment is expensive)
+        score = (
+            cells_info['min_cells_with_buffer'] * 100 +  # Capital cost
+            (1 - utilization) * 500 +  # Facility utilization
+            (1 - combined_equipment_util) * 1500 +  # Equipment utilization (HEAVY WEIGHT)
+            (1 - load_consistency) * 300  # Daily work consistency
+        )
         
         results.append({
             'cell_volume_cy': cell_volume,
@@ -265,6 +301,11 @@ def optimize_cell_configuration(daily_volume_cy, depth_ft, daily_load_capacity,
             'days_of_capacity': days_of_capacity,
             'utilization': utilization,
             'daily_throughput': daily_throughput * cells_info['min_cells_with_buffer'],
+            'equipment_utilization': combined_equipment_util,
+            'load_equipment_util': equipment_utilization,
+            'unload_equipment_util': unload_equipment_utilization,
+            'load_consistency': load_consistency,
+            'cell_start_interval': cell_start_interval,
             'score': score,
             'cycle_breakdown': cycle_info
         })
@@ -601,7 +642,7 @@ def main():
                 
                 optimal = results_df.iloc[0]
                 
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 
                 with col1:
                     st.metric(
@@ -626,9 +667,25 @@ def main():
                 
                 with col4:
                     st.metric(
-                        "Utilization",
+                        "Facility Utilization",
                         f"{optimal['utilization']*100:.1f}%",
-                        help="Facility utilization rate"
+                        help="Facility capacity utilization rate"
+                    )
+                
+                with col5:
+                    equipment_color = "normal"
+                    if optimal['equipment_utilization'] >= 0.85:
+                        equipment_color = "normal"
+                    elif optimal['equipment_utilization'] >= 0.70:
+                        equipment_color = "normal"
+                    else:
+                        equipment_color = "inverse"
+                    
+                    st.metric(
+                        "Equipment Utilization",
+                        f"{optimal['equipment_utilization']*100:.1f}%",
+                        help="Loader/excavator daily work utilization (higher = less idle time)",
+                        delta=f"{'Good' if optimal['equipment_utilization'] >= 0.75 else 'Consider more cells'}" if optimal['equipment_utilization'] < 0.75 else None
                     )
                 
                 # Detailed breakdown
@@ -645,6 +702,7 @@ def main():
                             'Cell Width',
                             'Cell Depth',
                             'Cell Area',
+                            'Aspect Ratio',
                             'Number of Cells',
                             'Total Facility Capacity'
                         ],
@@ -654,6 +712,7 @@ def main():
                             f"{optimal['width_ft']:.1f} ft",
                             f"{optimal['depth_ft']:.1f} ft",
                             f"{optimal['area_sf']:.0f} sq ft",
+                            "2:1 (L:W)",
                             f"{optimal['num_cells']:.0f}",
                             f"{optimal['total_capacity_cy']:.0f} CY"
                         ]
@@ -681,6 +740,19 @@ def main():
                         ]
                     }
                     st.dataframe(pd.DataFrame(cycle_data), hide_index=True, use_container_width=True)
+                
+                # Equipment Utilization Details
+                st.markdown("**Equipment Utilization Analysis**")
+                st.info(f"""
+                **Equipment stays busy!** With {optimal['num_cells']:.0f} cells operating on staggered schedules:
+                - **Loading Equipment Utilization**: {optimal['load_equipment_util']*100:.1f}% - Loaders will be actively loading cells this much of the time
+                - **Unloading Equipment Utilization**: {optimal['unload_equipment_util']*100:.1f}% - Excavators will be actively unloading cells this much of the time
+                - **Combined Equipment Utilization**: {optimal['equipment_utilization']*100:.1f}% - Overall equipment productivity
+                - **Cell Start Interval**: Every {optimal['cell_start_interval']:.1f} days a new cell begins its cycle
+                - **Daily Work Consistency**: {optimal['load_consistency']*100:.1f}% - How consistently loaders work at capacity each day
+                
+                {'✅ **Excellent!** Equipment will stay consistently busy with minimal idle time.' if optimal['equipment_utilization'] >= 0.85 else '⚠️ **Consider adding more cells** to improve daily equipment utilization and reduce idle time.' if optimal['equipment_utilization'] < 0.70 else '✓ **Good balance** between equipment utilization and capital costs.'}
+                """)
                 
                 # Performance metrics
                 st.subheader("📈 Performance Metrics")
@@ -712,7 +784,7 @@ def main():
                 
                 # Alternative configurations
                 st.subheader("🔄 Alternative Configurations")
-                st.markdown("Top 10 alternative configurations ranked by optimization score")
+                st.markdown("Top 10 alternative configurations ranked by optimization score (balances capital cost, facility utilization, and equipment productivity)")
                 
                 display_df = results_df.head(10).copy()
                 display_df['Cell Size (CY)'] = display_df['cell_volume_cy'].astype(int)
@@ -722,13 +794,14 @@ def main():
                 )
                 display_df['Load Days'] = display_df['load_days'].astype(int)
                 display_df['Cycle Days'] = display_df['cycle_days'].astype(int)
-                display_df['Utilization'] = (display_df['utilization'] * 100).round(1).astype(str) + '%'
+                display_df['Facility Util'] = (display_df['utilization'] * 100).round(1).astype(str) + '%'
+                display_df['Equipment Util'] = (display_df['equipment_utilization'] * 100).round(1).astype(str) + '%'
                 display_df['Total Capacity (CY)'] = display_df['total_capacity_cy'].astype(int)
                 
                 st.dataframe(
                     display_df[[
                         'Cell Size (CY)', 'Cells', 'Dimensions (L×W)', 
-                        'Load Days', 'Cycle Days', 'Utilization', 'Total Capacity (CY)'
+                        'Load Days', 'Cycle Days', 'Facility Util', 'Equipment Util', 'Total Capacity (CY)'
                     ]],
                     hide_index=True,
                     use_container_width=True
@@ -738,7 +811,7 @@ def main():
                 st.subheader("📊 Configuration Analysis")
                 
                 # Create tabs for different visualizations
-                tab1, tab2, tab3 = st.tabs(["Cell Size vs Number", "Utilization Analysis", "Cycle Time"])
+                tab1, tab2, tab3, tab4 = st.tabs(["Cell Size vs Number", "Utilization Analysis", "Equipment Utilization", "Cycle Time"])
                 
                 with tab1:
                     fig1 = px.scatter(
@@ -747,12 +820,13 @@ def main():
                         y='num_cells',
                         size='utilization',
                         color='load_days',
-                        hover_data=['cycle_days', 'utilization'],
+                        hover_data=['cycle_days', 'equipment_utilization'],
                         labels={
                             'cell_volume_cy': 'Cell Size (CY)',
                             'num_cells': 'Number of Cells',
                             'load_days': 'Loading Days',
-                            'utilization': 'Utilization'
+                            'utilization': 'Facility Utilization',
+                            'equipment_utilization': 'Equipment Utilization'
                         },
                         title='Cell Size vs Number of Cells Required',
                         color_continuous_scale='Viridis'
@@ -767,11 +841,12 @@ def main():
                         y='utilization',
                         size='num_cells',
                         color='num_cells',
-                        hover_data=['load_days', 'cycle_days'],
+                        hover_data=['load_days', 'cycle_days', 'equipment_utilization'],
                         labels={
                             'cell_volume_cy': 'Cell Size (CY)',
-                            'utilization': 'Utilization',
-                            'num_cells': 'Number of Cells'
+                            'utilization': 'Facility Utilization',
+                            'num_cells': 'Number of Cells',
+                            'equipment_utilization': 'Equipment Utilization'
                         },
                         title='Facility Utilization by Configuration',
                         color_continuous_scale='RdYlGn'
@@ -781,6 +856,41 @@ def main():
                     st.plotly_chart(fig2, use_container_width=True)
                 
                 with tab3:
+                    # Equipment utilization analysis
+                    fig3 = px.scatter(
+                        results_df.head(20),
+                        x='cell_volume_cy',
+                        y='equipment_utilization',
+                        size='num_cells',
+                        color='load_days',
+                        hover_data=['num_cells', 'cycle_days', 'utilization', 'cell_start_interval'],
+                        labels={
+                            'cell_volume_cy': 'Cell Size (CY)',
+                            'equipment_utilization': 'Equipment Utilization',
+                            'num_cells': 'Number of Cells',
+                            'load_days': 'Loading Days',
+                            'cell_start_interval': 'Cell Start Interval (days)'
+                        },
+                        title='Equipment Utilization by Configuration (Higher = Less Idle Time)',
+                        color_continuous_scale='Blues'
+                    )
+                    fig3.add_hline(y=0.75, line_dash="dash", line_color="green", 
+                                  annotation_text="75% Good Target")
+                    fig3.add_hline(y=0.85, line_dash="dash", line_color="darkgreen", 
+                                  annotation_text="85% Excellent")
+                    st.plotly_chart(fig3, use_container_width=True)
+                    
+                    st.info("""
+                    **Understanding Equipment Utilization:**
+                    - **85%+**: Excellent - Equipment stays consistently busy with minimal idle time
+                    - **75-85%**: Good - Solid balance between productivity and flexibility
+                    - **60-75%**: Fair - Some idle days, consider adding cells for better utilization
+                    - **<60%**: Poor - Equipment frequently idle, strongly consider more/smaller cells
+                    
+                    Higher utilization = loaders/excavators work more days = better ROI on equipment costs
+                    """)
+                
+                with tab4:
                     # Cycle time breakdown for optimal config
                     cycle_breakdown = {
                         'Phase': ['Load', 'Rip', 'Treat', 'Dry', 'Unload'],
@@ -792,7 +902,7 @@ def main():
                             optimal['cycle_breakdown']['unload_calendar_days']
                         ]
                     }
-                    fig3 = px.bar(
+                    fig4 = px.bar(
                         cycle_breakdown,
                         x='Phase',
                         y='Days',
@@ -801,7 +911,7 @@ def main():
                         color='Phase',
                         color_discrete_sequence=px.colors.qualitative.Set2
                     )
-                    st.plotly_chart(fig3, use_container_width=True)
+                    st.plotly_chart(fig4, use_container_width=True)
                 
                 # Export options
                 st.subheader("💾 Export Results")
@@ -1081,23 +1191,36 @@ def main():
         3. **Optimizing Configuration**: Finds the best balance between:
            - Number of cells (capital cost)
            - Cell size (operational efficiency)
-           - Utilization (capacity management)
+           - Facility utilization (capacity management)
+           - **Equipment utilization (keeping loaders/excavators busy daily)**
            - Loading time (operational constraints)
         4. **Generating Schedules**: Creates detailed day-by-day treatment schedules showing cell operations
         
         ### Key Features
         
         - **Configuration Optimization**: Recommends optimal cell size and number
+        - **Equipment Productivity**: Ensures loaders and excavators stay busy, not idle
         - **Rectangular Cells**: Uses 2:1 length-to-width ratio for consistent design
         - **Weekend Scheduling**: Customizable work schedules by phase
         - **Detailed Schedules**: Day-by-day tracking of all cells with color-coded phases
         - **Excel Export**: Formatted reports matching industry standards
         
+        ### Why Equipment Utilization Matters
+        
+        **Idle equipment = wasted money.** The optimizer heavily weighs equipment utilization because:
+        - Loaders and excavators are expensive assets (purchase or rental)
+        - Operators are paid whether equipment is working or idle
+        - Smaller, more numerous cells = more consistent daily work
+        - Larger cells = longer loading periods = more idle days between operations
+        
+        **Target**: 75-85%+ equipment utilization means your team works productively most days.
+        
         ### Key Considerations
         
-        - **More cells** = Higher capital cost, but better surge capacity
-        - **Larger cells** = Fewer cells needed, but longer loading times
-        - **Optimal utilization** = 80-90% for good balance of cost and flexibility
+        - **More cells** = Higher capital cost, BUT better equipment utilization and surge capacity
+        - **Larger cells** = Fewer cells needed, BUT longer loading times and more equipment idle days
+        - **Optimal facility utilization** = 80-90% for capacity management
+        - **Optimal equipment utilization** = 75-85%+ to minimize idle time and maximize productivity
         
         ### Workflow
         
@@ -1107,9 +1230,10 @@ def main():
         4. Set treatment phase durations
         5. Define weekend working schedules
         6. Run the optimization
-        7. Review recommendations and alternatives
-        8. Generate detailed treatment schedule
-        9. Export formatted Excel reports
+        7. Review recommendations (note equipment utilization!)
+        8. Compare alternatives
+        9. Generate detailed treatment schedule
+        10. Export formatted Excel reports
         """)
 
 
