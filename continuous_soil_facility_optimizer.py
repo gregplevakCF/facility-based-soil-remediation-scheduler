@@ -445,7 +445,8 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_load_capacity,
         # ============================================================
         # LOADING (can happen same day as unloading - separate equipment)
         # Only ONE cell loads at a time!
-        # Limited by: incoming soil available, equipment capacity, cell space
+        # KEY: Loading rate is LIMITED BY INCOMING VOLUME, not equipment capacity
+        # You can only load what arrives that day, even if soil has accumulated
         # ============================================================
         if is_valid_work_day(current_date, 'load', weekend_params):
             
@@ -467,9 +468,10 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_load_capacity,
                 if cell.phase == 'Loading':
                     space_remaining = cell_volume - cell.soil_volume
                     
-                    # KEY CONSTRAINT: Can only load what's actually available!
-                    # Limited by: soil waiting, equipment capacity, cell space
-                    load_amount = min(space_remaining, daily_load_capacity, soil_waiting)
+                    # KEY CONSTRAINT: Loading rate = daily incoming volume
+                    # Can't load faster than soil arrives, even if pile has accumulated
+                    # Equipment capacity is NOT the limiting factor for loading
+                    load_amount = min(space_remaining, daily_volume_cy, soil_waiting)
                     
                     if load_amount > 0:
                         cell.soil_volume += load_amount
