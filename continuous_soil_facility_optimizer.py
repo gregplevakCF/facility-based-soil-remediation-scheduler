@@ -332,13 +332,21 @@ def is_valid_work_day(date, phase_name, weekend_params):
     return False
 
 
-def simulate_facility_schedule(optimal_config, daily_volume_cy, daily_load_capacity, 
+def simulate_facility_schedule(config, daily_volume_cy, daily_load_capacity, 
                                daily_unload_capacity, phase_params, weekend_params,
                                start_date, simulation_days=180):
-    """Simulate facility operations and create detailed schedule"""
+    """Simulate facility operations with SEQUENTIAL loading/unloading
     
-    cell_volume = optimal_config['cell_volume_cy']
-    num_cells = int(optimal_config['num_cells'])
+    Key Rules:
+    - Only ONE cell can be loading at a time (equipment is shared)
+    - Only ONE cell can be unloading at a time
+    - Load a cell completely before moving to the next
+    - Unload a cell completely before moving to the next
+    - Phase transitions happen at the START of the next day (not same day)
+    """
+    
+    cell_volume = config['cell_volume_cy']
+    num_cells = int(config['num_cells'])
     
     # Initialize cell tracking
     class CellState:
@@ -346,9 +354,9 @@ def simulate_facility_schedule(optimal_config, daily_volume_cy, daily_load_capac
             self.cell_num = cell_num
             self.phase = 'Empty'
             self.soil_volume = 0
-            self.phase_start_date = None
             self.phase_workdays_completed = 0
             self.flip_num = 0
+            self.pending_transition = None  # Next phase to transition to
             
     cells = {i: CellState(i) for i in range(1, num_cells + 1)}
     
@@ -356,105 +364,168 @@ def simulate_facility_schedule(optimal_config, daily_volume_cy, daily_load_capac
     schedule = []
     current_date = start_date
     
-    # Accumulator for incoming soil not yet loaded
-    soil_waiting = 0
+    # Track which cell is actively loading/unloading (only one at a time!)
+    active_loading_cell = None
+    active_unloading_cell = None
+    
+    # Tracking
     total_soil_loaded = 0
     total_soil_unloaded = 0
     next_flip_num = 1
     
     for day in range(simulation_days):
-        day_activities = {
+        
+        # ============================================================
+        # START OF DAY: Process pending transitions from yesterday
+        # ============================================================
+        for cell_num in range(1, num_cells + 1):
+            cell = cells[cell_num]
+            if cell.pending_transition:
+                cell.phase = cell.pending_transition
+                cell.pending_transition = None
+                cell.phase_workdays_completed = 0
+                
+                # Clear active references if cell transitioned out
+                if cell.phase == 'Rip' and active_loading_cell == cell_num:
+                    active_loading_cell = None
+                if cell.phase == 'Empty' and active_unloading_cell == cell_num:
+                    active_unloading_cell = None
+        
+        day_record = {
             'Date': current_date,
             'DayName': current_date.strftime('%A'),
         }
         
-        # Add daily incoming volume to waiting pile
-        soil_waiting += daily_volume_cy
+        daily_soil_in = 0
+        daily_soil_out = 0
         
-        # Phase 1: Unloading (priority)
+        # ============================================================
+        # PHASE 1: UNLOADING (Priority - frees up cells)
+        # Only ONE cell unloads at a time!
+        # ============================================================
         if is_valid_work_day(current_date, 'unload', weekend_params):
-            remaining_unload_capacity = daily_unload_capacity
             
-            for cell in sorted(cells.values(), key=lambda c: (c.phase != 'ReadyToUnload', c.flip_num)):
-                if cell.phase == 'ReadyToUnload' and remaining_unload_capacity > 0:
-                    unload_amount = min(cell.soil_volume, remaining_unload_capacity)
-                    cell.soil_volume -= unload_amount
-                    remaining_unload_capacity -= unload_amount
-                    total_soil_unloaded += unload_amount
+            # If no active unloading cell, find one that's ready
+            if active_unloading_cell is None:
+                for cell_num in range(1, num_cells + 1):
+                    cell = cells[cell_num]
+                    if cell.phase == 'ReadyToUnload':
+                        active_unloading_cell = cell_num
+                        cell.phase = 'Unloading'
+                        break
+            
+            # Unload the active cell
+            if active_unloading_cell is not None:
+                cell = cells[active_unloading_cell]
+                if cell.phase == 'Unloading':
+                    unload_amount = min(cell.soil_volume, daily_unload_capacity)
                     
+                    if unload_amount > 0:
+                        cell.soil_volume -= unload_amount
+                        daily_soil_out = unload_amount
+                        total_soil_unloaded += unload_amount
+                    
+                    # Check if unloading complete - schedule transition for tomorrow
                     if cell.soil_volume <= 0:
-                        cell.phase = 'Empty'
+                        cell.pending_transition = 'Empty'
                         cell.flip_num = 0
         
-        # Phase 2: Loading
+        # ============================================================
+        # PHASE 2: LOADING (Only ONE cell at a time!)
+        # ============================================================
         if is_valid_work_day(current_date, 'load', weekend_params):
-            remaining_load_capacity = daily_load_capacity
             
-            # Start new cells if empty and soil is waiting
-            for cell in sorted(cells.values(), key=lambda c: c.cell_num):
-                if cell.phase == 'Empty' and soil_waiting > 0 and remaining_load_capacity > 0:
-                    cell.phase = 'Loading'
-                    cell.flip_num = next_flip_num
-                    next_flip_num += 1
-                    cell.phase_start_date = current_date
-                    cell.phase_workdays_completed = 0
+            # If no active loading cell, find an empty one to start
+            if active_loading_cell is None:
+                for cell_num in range(1, num_cells + 1):
+                    cell = cells[cell_num]
+                    if cell.phase == 'Empty':
+                        cell.phase = 'Loading'
+                        cell.flip_num = next_flip_num
+                        next_flip_num += 1
+                        cell.soil_volume = 0
+                        active_loading_cell = cell_num
+                        break
             
-            # Load cells that are in Loading phase
-            for cell in sorted(cells.values(), key=lambda c: (c.phase != 'Loading', c.flip_num)):
-                if cell.phase == 'Loading' and remaining_load_capacity > 0 and soil_waiting > 0:
-                    space_in_cell = cell_volume - cell.soil_volume
-                    load_amount = min(space_in_cell, remaining_load_capacity, soil_waiting)
+            # Load the active cell
+            if active_loading_cell is not None:
+                cell = cells[active_loading_cell]
+                if cell.phase == 'Loading':
+                    space_remaining = cell_volume - cell.soil_volume
+                    load_amount = min(space_remaining, daily_load_capacity)
                     
-                    cell.soil_volume += load_amount
-                    soil_waiting -= load_amount
-                    remaining_load_capacity -= load_amount
-                    total_soil_loaded += load_amount
+                    if load_amount > 0:
+                        cell.soil_volume += load_amount
+                        daily_soil_in = load_amount
+                        total_soil_loaded += load_amount
                     
-                    # Check if loading complete
+                    # Check if loading complete - schedule transition for tomorrow
                     if cell.soil_volume >= cell_volume:
-                        cell.phase = 'Rip'
-                        cell.phase_start_date = current_date
-                        cell.phase_workdays_completed = 0
+                        cell.pending_transition = 'Rip'
         
-        # Phase 3: Progress other phases
-        for cell in cells.values():
+        # ============================================================
+        # PHASE 3: Progress treatment phases for ALL cells
+        # ============================================================
+        for cell_num in range(1, num_cells + 1):
+            cell = cells[cell_num]
+            
             if cell.phase == 'Rip':
                 if is_valid_work_day(current_date, 'rip', weekend_params):
                     cell.phase_workdays_completed += 1
                     if cell.phase_workdays_completed >= phase_params['rip_days']:
-                        cell.phase = 'Treat'
-                        cell.phase_start_date = current_date
-                        cell.phase_workdays_completed = 0
+                        cell.pending_transition = 'Treat'
                         
             elif cell.phase == 'Treat':
                 if is_valid_work_day(current_date, 'treat', weekend_params):
                     cell.phase_workdays_completed += 1
                     if cell.phase_workdays_completed >= phase_params['treat_days']:
-                        cell.phase = 'Dry'
-                        cell.phase_start_date = current_date
-                        cell.phase_workdays_completed = 0
+                        cell.pending_transition = 'Dry'
                         
             elif cell.phase == 'Dry':
                 if is_valid_work_day(current_date, 'dry', weekend_params):
                     cell.phase_workdays_completed += 1
                     if cell.phase_workdays_completed >= phase_params['dry_days']:
-                        cell.phase = 'ReadyToUnload'
-                        cell.phase_start_date = current_date
+                        cell.pending_transition = 'ReadyToUnload'
         
-        # Record cell states
+        # ============================================================
+        # Record cell states for this day
+        # ============================================================
         for cell_num in range(1, num_cells + 1):
             cell = cells[cell_num]
-            phase_display = cell.phase
-            if cell.phase not in ['Empty', 'ReadyToUnload']:
-                phase_display = f"{cell.phase} ({cell.flip_num})"
-            day_activities[f'Cell_{cell_num}_Phase'] = phase_display
-            day_activities[f'Cell_{cell_num}_Volume'] = cell.soil_volume
+            
+            # Format phase display to match original scheduler format
+            # Only show Load/Unload if work was done that day
+            if cell.phase == 'Loading':
+                if active_loading_cell == cell_num and daily_soil_in > 0:
+                    phase_display = f"Load ({int(daily_soil_in)})"
+                else:
+                    phase_display = ''  # Non-work day or not active
+            elif cell.phase == 'Unloading':
+                if active_unloading_cell == cell_num and daily_soil_out > 0:
+                    phase_display = f"Unload ({int(daily_soil_out)})"
+                else:
+                    phase_display = ''  # Non-work day or not active
+            elif cell.phase == 'Rip':
+                phase_display = 'Rip'
+            elif cell.phase == 'Treat':
+                phase_display = 'Treat'
+            elif cell.phase == 'Dry':
+                phase_display = 'Dry'
+            elif cell.phase == 'ReadyToUnload':
+                phase_display = ''  # Waiting for equipment
+            elif cell.phase == 'Empty':
+                phase_display = ''
+            else:
+                phase_display = cell.phase
+            
+            day_record[f'Cell_{cell_num}_Phase'] = phase_display
         
-        day_activities['SoilWaiting'] = soil_waiting
-        day_activities['CumSoilIn'] = total_soil_loaded
-        day_activities['CumSoilOut'] = total_soil_unloaded
+        day_record['SoilIn'] = daily_soil_in
+        day_record['SoilOut'] = daily_soil_out
+        day_record['CumSoilIn'] = total_soil_loaded
+        day_record['CumSoilOut'] = total_soil_unloaded
         
-        schedule.append(day_activities)
+        schedule.append(day_record)
         current_date += timedelta(days=1)
     
     return pd.DataFrame(schedule)
@@ -1060,7 +1131,7 @@ def main():
                     display_cols = ['Date', 'DayName']
                     for i in range(1, int(selected_config['num_cells']) + 1):
                         display_cols.append(f'Cell_{i}_Phase')
-                    display_cols.extend(['SoilWaiting', 'CumSoilIn', 'CumSoilOut'])
+                    display_cols.extend(['SoilIn', 'SoilOut', 'CumSoilIn', 'CumSoilOut'])
                     
                     preview_df = schedule_df[display_cols].head(14).copy()
                     preview_df['Date'] = preview_df['Date'].dt.strftime('%Y-%m-%d')
@@ -1083,20 +1154,16 @@ def main():
                                     'Days Simulated',
                                     'Cell Size (CY)',
                                     'Number of Cells',
-                                    'Daily Incoming Volume (CY)',
                                     'Total Soil Loaded (CY)',
                                     'Total Soil Unloaded (CY)',
-                                    'Soil Waiting (End)',
                                 ],
                                 'Value': [
                                     schedule_start.strftime('%Y-%m-%d'),
                                     len(schedule_df),
                                     selected_config['cell_volume_cy'],
                                     int(selected_config['num_cells']),
-                                    daily_volume,
                                     schedule_df['CumSoilIn'].iloc[-1],
                                     schedule_df['CumSoilOut'].iloc[-1],
-                                    schedule_df['SoilWaiting'].iloc[-1]
                                 ]
                             }
                             pd.DataFrame(schedule_summary).to_excel(writer, sheet_name='Summary', index=False)
@@ -1110,10 +1177,11 @@ def main():
                             
                             # Define colors matching original
                             phase_colors = {
-                                'Loading': '#8ED973',
+                                'Load': '#8ED973',
                                 'Rip': '#83CCEB',
                                 'Treat': '#FFC000',
                                 'Dry': '#F2CEEF',
+                                'Unload': '#00B0F0',
                                 'ReadyToUnload': '#00B0F0',
                                 'Empty': '#FFFFFF'
                             }
