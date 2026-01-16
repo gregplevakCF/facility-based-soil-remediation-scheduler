@@ -202,9 +202,9 @@ def calculate_cells_needed(daily_volume, cell_volume, cycle_days, buffer_factor=
 def find_max_daily_volume(num_cells, cell_volume, daily_equipment_capacity,
                           phase_params, weekend_params, simulation_days=120):
     """Binary search to find the maximum daily volume a configuration can handle
-    while maintaining continuous operation (zero idle days).
+    while maintaining continuous operation (zero idle days AND zero queue buildup).
     
-    Returns the maximum CY/day this config can process without turning away work.
+    Returns the maximum CY/day this config can process sustainably.
     """
     
     low, high = 50, 1500  # Search range for daily volume
@@ -212,12 +212,13 @@ def find_max_daily_volume(num_cells, cell_volume, daily_equipment_capacity,
     
     while low <= high:
         mid = (low + high) // 2
-        idle_days, _ = simulate_for_idle_days(
+        idle_days, max_waiting = simulate_for_idle_days(
             num_cells, cell_volume, mid, daily_equipment_capacity,
             phase_params, weekend_params, simulation_days
         )
         
-        if idle_days == 0:
+        # Must have BOTH zero idle days AND zero queue buildup to be sustainable
+        if idle_days == 0 and max_waiting == 0:
             max_found = mid
             low = mid + 1
         else:
@@ -268,22 +269,27 @@ def optimize_cell_configuration(daily_volume_cy, daily_equipment_capacity,
         # Test different numbers of cells (2 to 12)
         for num_cells in range(2, 13):
             
-            # Run simulation to get actual idle days
+            # Run simulation at the PLANNED volume to check if it's sustainable
             idle_days, max_waiting = simulate_for_idle_days(
                 num_cells, cell_volume, daily_volume_cy, daily_equipment_capacity,
-                phase_params, weekend_params, simulation_days=90
+                phase_params, weekend_params, simulation_days=180  # Longer sim for accuracy
             )
             
-            # Calculate maximum daily volume this config can handle
+            # Skip configurations that can't sustain the planned volume
+            # Must have zero idle days AND zero queue buildup
+            if idle_days > 0 or max_waiting > 0:
+                continue
+            
+            # Calculate maximum daily volume this config can handle (for display)
             max_daily_volume = find_max_daily_volume(
                 num_cells, cell_volume, daily_equipment_capacity,
                 phase_params, weekend_params
             )
             
-            # Skip configurations that can't handle the planned incoming volume
-            # No point showing configs that would fail immediately
+            # If binary search max is less than planned (due to non-monotonic behavior),
+            # use planned volume since we already verified it works
             if max_daily_volume < daily_volume_cy:
-                continue
+                max_daily_volume = daily_volume_cy
             
             # Calculate buffer/headroom
             buffer_cy = max_daily_volume - daily_volume_cy
@@ -419,7 +425,33 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
         can_unload = is_work_day(current_date, 'unload')
         
         # ============================================================
-        # LOADING - at incoming rate (MUST keep up with trucks)
+        # UNLOADING FIRST - so cells become available for loading
+        # ============================================================
+        if can_unload:
+            # Find or assign active unloading cell (lowest flip number ready)
+            if active_unloading_cell is None:
+                ready_cells = [(i, cells[i]) for i in range(num_cells) 
+                              if cells[i].phase == 'ReadyToUnload']
+                if ready_cells:
+                    ready_cells.sort(key=lambda x: x[1].flip_num)
+                    active_unloading_cell = ready_cells[0][0]
+                    cells[active_unloading_cell].phase = 'Unloading'
+            
+            # Unload at surplus rate
+            if active_unloading_cell is not None:
+                cell = cells[active_unloading_cell]
+                if cell.phase == 'Unloading':
+                    unload_amount = min(cell.soil_volume, daily_unload_rate)
+                    if unload_amount > 0:
+                        cell.soil_volume -= unload_amount
+                    if cell.soil_volume <= 0:
+                        # Cell is now IMMEDIATELY empty and available for loading today
+                        cell.phase = 'Empty'
+                        cell.flip_num = 0
+                        active_unloading_cell = None
+        
+        # ============================================================
+        # LOADING - now any just-emptied cells are available
         # ============================================================
         if can_load:
             remaining_load_capacity = daily_load_rate
@@ -459,29 +491,6 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
             # Count as idle day if soil arrived but we couldn't load any
             if not loaded_today:
                 idle_days += 1
-        
-        # ============================================================
-        # UNLOADING - at surplus capacity rate (equipment - loading)
-        # ============================================================
-        if can_unload:
-            # Find or assign active unloading cell (lowest flip number ready)
-            if active_unloading_cell is None:
-                ready_cells = [(i, cells[i]) for i in range(num_cells) 
-                              if cells[i].phase == 'ReadyToUnload']
-                if ready_cells:
-                    ready_cells.sort(key=lambda x: x[1].flip_num)
-                    active_unloading_cell = ready_cells[0][0]
-                    cells[active_unloading_cell].phase = 'Unloading'
-            
-            # Unload at surplus rate
-            if active_unloading_cell is not None:
-                cell = cells[active_unloading_cell]
-                if cell.phase == 'Unloading':
-                    unload_amount = min(cell.soil_volume, daily_unload_rate)
-                    if unload_amount > 0:
-                        cell.soil_volume -= unload_amount
-                    if cell.soil_volume <= 0:
-                        cell.pending_transition = 'Empty'
         
         max_waiting = max(max_waiting, soil_waiting)
         
@@ -611,7 +620,38 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
         can_unload = is_valid_work_day(current_date, 'unload', weekend_params)
         
         # ============================================================
-        # LOADING - at incoming rate (MUST keep up with trucks)
+        # UNLOADING FIRST - so cells become available for loading
+        # ============================================================
+        cell_unload_amounts = {}  # Track which cell unloaded and how much
+        
+        if can_unload:
+            # Find or assign active unloading cell (lowest flip number ready)
+            if active_unloading_cell is None:
+                ready_cells = [(cell_num, cells[cell_num]) for cell_num in range(1, num_cells + 1) 
+                              if cells[cell_num].phase == 'ReadyToUnload']
+                if ready_cells:
+                    ready_cells.sort(key=lambda x: x[1].flip_num)
+                    active_unloading_cell = ready_cells[0][0]
+                    cells[active_unloading_cell].phase = 'Unloading'
+            
+            # Unload at surplus rate
+            if active_unloading_cell is not None:
+                cell = cells[active_unloading_cell]
+                if cell.phase == 'Unloading':
+                    unload_amount = min(cell.soil_volume, daily_unload_rate)
+                    if unload_amount > 0:
+                        cell.soil_volume -= unload_amount
+                        daily_soil_out = unload_amount
+                        total_soil_unloaded += unload_amount
+                        cell_unload_amounts[active_unloading_cell] = unload_amount
+                    if cell.soil_volume <= 0:
+                        # Cell is now IMMEDIATELY empty and available for loading today
+                        cell.phase = 'Empty'
+                        cell.flip_num = 0
+                        active_unloading_cell = None
+        
+        # ============================================================
+        # LOADING - now any just-emptied cells are available
         # ============================================================
         cell_load_amounts = {}  # Track how much each cell loaded today
         
@@ -655,32 +695,6 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
                         active_loading_cell = None  # Clear so we find next empty cell
         
         # ============================================================
-        # UNLOADING - at surplus capacity rate (equipment - loading)
-        # ============================================================
-        if can_unload:
-            # Find or assign active unloading cell (lowest flip number ready)
-            if active_unloading_cell is None:
-                ready_cells = [(cell_num, cells[cell_num]) for cell_num in range(1, num_cells + 1) 
-                              if cells[cell_num].phase == 'ReadyToUnload']
-                if ready_cells:
-                    ready_cells.sort(key=lambda x: x[1].flip_num)
-                    active_unloading_cell = ready_cells[0][0]
-                    cells[active_unloading_cell].phase = 'Unloading'
-            
-            # Unload at surplus rate
-            if active_unloading_cell is not None:
-                cell = cells[active_unloading_cell]
-                if cell.phase == 'Unloading':
-                    unload_amount = min(cell.soil_volume, daily_unload_rate)
-                    if unload_amount > 0:
-                        cell.soil_volume -= unload_amount
-                        daily_soil_out = unload_amount
-                        total_soil_unloaded += unload_amount
-                    if cell.soil_volume <= 0:
-                        cell.pending_transition = 'Empty'
-                        cell.flip_num = 0
-        
-        # ============================================================
         # Progress treatment phases for ALL cells
         # ============================================================
         for cell_num in range(1, num_cells + 1):
@@ -711,17 +725,16 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
             cell = cells[cell_num]
             
             # Format phase display
-            if cell.phase == 'Loading' or (cell.pending_transition == 'Rip' and cell_num in cell_load_amounts):
-                # Cell loaded today (might be transitioning to Rip)
-                if cell_num in cell_load_amounts:
-                    phase_display = f"Load ({int(cell_load_amounts[cell_num])})"
-                else:
-                    phase_display = ''
+            # If cell both unloaded AND loaded today, show Load (it's the ending activity)
+            if cell_num in cell_load_amounts:
+                phase_display = f"Load ({int(cell_load_amounts[cell_num])})"
+            # Check if this cell unloaded today (even if it's now Empty)
+            elif cell_num in cell_unload_amounts:
+                phase_display = f"Unload ({int(cell_unload_amounts[cell_num])})"
+            elif cell.phase == 'Loading':
+                phase_display = ''  # Loading but no soil loaded today
             elif cell.phase == 'Unloading':
-                if active_unloading_cell == cell_num and daily_soil_out > 0:
-                    phase_display = f"Unload ({int(daily_soil_out)})"
-                else:
-                    phase_display = ''
+                phase_display = ''  # Unloading but nothing unloaded today
             elif cell.phase == 'Rip':
                 phase_display = 'Rip'
             elif cell.phase == 'Treat':
