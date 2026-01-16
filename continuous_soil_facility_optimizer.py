@@ -348,8 +348,14 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
         day_of_week = date.weekday()
         is_saturday = day_of_week == 5
         is_sunday = day_of_week == 6
+        is_weekend = is_saturday or is_sunday
         
-        if phase_type == 'load':
+        if phase_type == 'receive':
+            # Deliveries only on weekends if receive_weekend is True
+            if is_weekend and not weekend_params.get('receive_weekend', False):
+                return False
+            return True
+        elif phase_type == 'load':
             if is_saturday and not weekend_params['load_saturday']:
                 return False
             if is_sunday and not weekend_params['load_sunday']:
@@ -412,8 +418,8 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
                     active_unloading_cell = None
                     cell.flip_num = 0
         
-        # Soil arrives on loading work days
-        if is_work_day(current_date, 'load'):
+        # Soil arrives on delivery days (may be different from load work days)
+        if is_work_day(current_date, 'receive'):
             soil_waiting += daily_volume_cy
         
         loaded_today = False
@@ -521,6 +527,10 @@ def is_valid_work_day(date, phase_name, weekend_params):
     if day_of_week < 5:
         return True
     
+    # Special handling for 'receive' - uses single toggle
+    if phase_name.lower() == 'receive':
+        return weekend_params.get('receive_weekend', False)
+    
     # Saturday
     if day_of_week == 5:
         return weekend_params.get(f'{phase_name.lower()}_saturday', False)
@@ -600,9 +610,12 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
         
         # ============================================================
         # DAILY INCOMING: Add today's incoming soil to waiting pile
+        # Soil arrives on delivery days (may be different from load work days)
         # ============================================================
-        if is_valid_work_day(current_date, 'load', weekend_params):
+        daily_delivered = 0
+        if is_valid_work_day(current_date, 'receive', weekend_params):
             soil_waiting += daily_volume_cy
+            daily_delivered = daily_volume_cy
         
         day_record = {
             'Date': current_date,
@@ -746,6 +759,7 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
             
             day_record[f'Cell_{cell_num}_Phase'] = phase_display
         
+        day_record['Delivered'] = daily_delivered
         day_record['SoilIn'] = daily_soil_in
         day_record['SoilOut'] = daily_soil_out
         day_record['SoilWaiting'] = soil_waiting
@@ -828,6 +842,13 @@ def main():
         # Weekend Working
         st.subheader("Weekend Operations")
         
+        st.markdown("**Deliveries**")
+        receive_weekend = st.checkbox(
+            "Receive deliveries on weekends", 
+            value=False,
+            help="If unchecked, trucks only deliver Mon-Fri. Equipment can still load/unload stockpiled soil on weekends."
+        )
+        
         st.markdown("**Loading**")
         load_saturday = st.checkbox("Work Saturdays (Load)", value=False)
         load_sunday = st.checkbox("Work Sundays (Load)", value=False)
@@ -887,6 +908,7 @@ def main():
             }
             
             weekend_params = {
+                'receive_weekend': receive_weekend,
                 'load_saturday': load_saturday,
                 'load_sunday': load_sunday,
                 'rip_saturday': rip_saturday,
@@ -1137,14 +1159,14 @@ def main():
             display_cols = ['Date', 'DayName']
             for i in range(1, int(selected_config['num_cells']) + 1):
                 display_cols.append(f'Cell_{i}_Phase')
-            display_cols.extend(['SoilIn', 'SoilOut', 'SoilWaiting'])
+            display_cols.extend(['Delivered', 'SoilIn', 'SoilOut', 'SoilWaiting'])
             
             # Prepare display dataframe
             display_schedule = schedule_df[display_cols].copy()
             display_schedule['Date'] = display_schedule['Date'].dt.strftime('%m/%d/%Y')
             
             # Rename columns for cleaner display
-            rename_map = {'DayName': 'Day', 'SoilIn': 'In', 'SoilOut': 'Out', 'SoilWaiting': 'Wait'}
+            rename_map = {'DayName': 'Day', 'Delivered': 'Recv', 'SoilIn': 'In', 'SoilOut': 'Out', 'SoilWaiting': 'Wait'}
             for i in range(1, int(selected_config['num_cells']) + 1):
                 rename_map[f'Cell_{i}_Phase'] = f'Cell {i}'
             display_schedule = display_schedule.rename(columns=rename_map)
