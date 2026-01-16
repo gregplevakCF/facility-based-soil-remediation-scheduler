@@ -326,10 +326,9 @@ def optimize_cell_configuration(daily_volume_cy, daily_equipment_capacity,
     if not results:
         return None
     
-    # Sort by score (lower is better) and limit to top 10
+    # Sort by score (lower is better)
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('score').reset_index(drop=True)
-    results_df = results_df.head(10)
     
     return results_df
 
@@ -791,6 +790,8 @@ def main():
         st.session_state.schedule_df = None
     if 'schedule_start' not in st.session_state:
         st.session_state.schedule_start = None
+    if 'run_id' not in st.session_state:
+        st.session_state.run_id = 0
     
     # Sidebar for inputs
     with st.sidebar:
@@ -913,6 +914,7 @@ def main():
             st.session_state.results_df = results_df
             st.session_state.selected_config_index = 0 if results_df is not None and len(results_df) > 0 else None
             st.session_state.optimization_run = True
+            st.session_state.run_id += 1  # Increment to reset widget states
             # Clear any previous schedule when new optimization runs
             st.session_state.schedule_generated = False
             st.session_state.schedule_df = None
@@ -1000,31 +1002,74 @@ def main():
                         help="Fewest idle days found"
                     )
             
-            # Configuration Selection (simplified)
+            # Configuration Selection with Filters
             st.subheader("📋 Select Configuration")
             
+            # Filter controls
+            filter_col1, filter_col2 = st.columns(2)
+            
+            # Get unique values for filters
+            all_cell_counts = sorted(results_df['num_cells'].unique().astype(int).tolist())
+            all_cell_sizes = sorted(results_df['cell_volume_cy'].unique().astype(int).tolist())
+            
+            # Use run_id in keys to reset widgets when optimization runs
+            run_id = st.session_state.run_id
+            
+            with filter_col1:
+                filter_cells = st.selectbox(
+                    "Filter by # of Cells:",
+                    options=["All"] + all_cell_counts,
+                    index=0,
+                    key=f"filter_cells_{run_id}"
+                )
+            
+            with filter_col2:
+                filter_size = st.selectbox(
+                    "Filter by Cell Size (CY):",
+                    options=["All"] + all_cell_sizes,
+                    index=0,
+                    key=f"filter_size_{run_id}"
+                )
+            
+            # Apply filters
+            filtered_df = results_df.copy()
+            if filter_cells != "All":
+                filtered_df = filtered_df[filtered_df['num_cells'] == filter_cells]
+            if filter_size != "All":
+                filtered_df = filtered_df[filtered_df['cell_volume_cy'] == filter_size]
+            
+            # Reset index after filtering
+            filtered_df = filtered_df.reset_index(drop=True)
+            
+            if len(filtered_df) == 0:
+                st.warning("No configurations match the selected filters. Try different filter values.")
+                return
+            
+            st.caption(f"Showing {len(filtered_df)} of {len(results_df)} viable configurations")
+            
+            # Configuration dropdown
             col1, col2 = st.columns([3, 1])
             
             with col1:
                 selected_index = st.selectbox(
                     "Choose configuration:",
-                    options=range(len(results_df)),
-                    format_func=lambda x: f"{int(results_df.iloc[x]['num_cells'])} × {int(results_df.iloc[x]['cell_volume_cy'])} CY (max {int(results_df.iloc[x]['max_daily_volume'])} CY/day)",
+                    options=range(len(filtered_df)),
+                    format_func=lambda x: f"{int(filtered_df.iloc[x]['num_cells'])} × {int(filtered_df.iloc[x]['cell_volume_cy'])} CY (max {int(filtered_df.iloc[x]['max_daily_volume'])} CY/day)",
                     index=0,
-                    key="config_selector"
+                    key=f"config_selector_{run_id}"
                 )
-                st.session_state.selected_config_index = selected_index
+            
+            # Get selected config directly from filtered_df (fixes persistence bug)
+            selected_config = filtered_df.iloc[selected_index]
             
             with col2:
-                idle = results_df.iloc[selected_index]['idle_days']
+                idle = selected_config['idle_days']
                 if idle == 0:
                     st.success("✅ Continuous")
                 else:
                     st.warning(f"⚠️ {int(idle)} Idle")
             
             # Display selected configuration details
-            selected_config = results_df.iloc[selected_index]
-            
             detail_col1, detail_col2, detail_col3, detail_col4 = st.columns(4)
             
             with detail_col1:
