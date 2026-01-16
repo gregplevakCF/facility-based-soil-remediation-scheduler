@@ -793,8 +793,10 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
             cell = cells[cell_num]
             
             # Format phase display
-            # If cell both unloaded AND loaded today, show Load (it's the ending activity)
-            if cell_num in cell_load_amounts:
+            # If cell both unloaded AND loaded today, show both (important for understanding flow)
+            if cell_num in cell_unload_amounts and cell_num in cell_load_amounts:
+                phase_display = f"Out({int(cell_unload_amounts[cell_num])})→In({int(cell_load_amounts[cell_num])})"
+            elif cell_num in cell_load_amounts:
                 phase_display = f"Load ({int(cell_load_amounts[cell_num])})"
             # Check if this cell unloaded today (even if it's now Empty)
             elif cell_num in cell_unload_amounts:
@@ -1232,6 +1234,7 @@ def main():
             
             # Define phase colors (matching Excel export)
             phase_colors = {
+                'Out': '#9966FF',     # Purple - transition day (unload then load)
                 'Load': '#8ED973',    # Green
                 'Rip': '#83CCEB',     # Light blue
                 'Treat': '#FFC000',   # Gold/Orange
@@ -1281,7 +1284,7 @@ def main():
             
             # Legend
             st.markdown("**Legend:**")
-            legend_cols = st.columns(5)
+            legend_cols = st.columns(6)
             with legend_cols[0]:
                 st.markdown('<div style="background-color: #8ED973; padding: 5px; text-align: center; border-radius: 3px;">Load</div>', unsafe_allow_html=True)
             with legend_cols[1]:
@@ -1292,6 +1295,8 @@ def main():
                 st.markdown('<div style="background-color: #F2CEEF; padding: 5px; text-align: center; border-radius: 3px;">Dry</div>', unsafe_allow_html=True)
             with legend_cols[4]:
                 st.markdown('<div style="background-color: #00B0F0; padding: 5px; text-align: center; border-radius: 3px;">Unload</div>', unsafe_allow_html=True)
+            with legend_cols[5]:
+                st.markdown('<div style="background-color: #9966FF; padding: 5px; text-align: center; border-radius: 3px; color: white;">Out→In</div>', unsafe_allow_html=True)
             
             # Export options
             st.markdown("---")
@@ -1341,6 +1346,7 @@ def main():
                 
                 # Define colors matching display
                 excel_phase_colors = {
+                    'Out': '#9966FF',     # Purple - transition day
                     'Load': '#8ED973',
                     'Rip': '#83CCEB',
                     'Treat': '#FFC000',
