@@ -402,8 +402,8 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
     next_flip_num = 1
     
     # Calculate daily rates
-    daily_load_rate = daily_volume_cy  # Loading matches incoming
-    daily_unload_rate = daily_equipment_capacity - daily_volume_cy  # Unloading gets the rest
+    # Base rates - but these will be adjusted dynamically
+    daily_load_rate = daily_volume_cy  # Target: match incoming
     
     for day in range(simulation_days):
         # Process pending transitions
@@ -418,18 +418,44 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
                     active_unloading_cell = None
                     cell.flip_num = 0
         
-        # Soil arrives on delivery days (may be different from load work days)
-        if is_work_day(current_date, 'receive'):
-            soil_waiting += daily_volume_cy
-        
-        loaded_today = False
+        # Check what's happening today
+        receiving_today = is_work_day(current_date, 'receive')
         can_load = is_work_day(current_date, 'load')
         can_unload = is_work_day(current_date, 'unload')
+        
+        # Soil arrives on delivery days
+        if receiving_today:
+            soil_waiting += daily_volume_cy
+        
+        # Dynamic equipment allocation:
+        # - If receiving soil today: loading gets priority (must keep up with trucks)
+        # - If NOT receiving: prioritize UNLOADING to free cells, then load from stockpile
+        if receiving_today:
+            # Must keep up with incoming - loading gets priority
+            today_load_rate = min(daily_volume_cy, daily_equipment_capacity)
+            today_unload_rate = max(0, daily_equipment_capacity - today_load_rate)
+        else:
+            # No new soil arriving - UNLOAD FIRST to free cells for future use
+            # Then load from stockpile with remaining equipment
+            if can_unload:
+                today_unload_rate = daily_equipment_capacity
+            else:
+                today_unload_rate = 0
+            
+            if can_load:
+                # After unloading work is done for the day, remaining capacity goes to loading
+                # But we'll handle this dynamically in the loading section
+                today_load_rate = daily_equipment_capacity  # Full capacity available
+            else:
+                today_load_rate = 0
+        
+        loaded_today = False
+        equipment_used = 0  # Track total equipment used today
         
         # ============================================================
         # UNLOADING FIRST - so cells become available for loading
         # ============================================================
-        if can_unload:
+        if can_unload and today_unload_rate > 0:
             # Find or assign active unloading cell (lowest flip number ready)
             if active_unloading_cell is None:
                 ready_cells = [(i, cells[i]) for i in range(num_cells) 
@@ -439,13 +465,14 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
                     active_unloading_cell = ready_cells[0][0]
                     cells[active_unloading_cell].phase = 'Unloading'
             
-            # Unload at surplus rate
+            # Unload at today's available rate
             if active_unloading_cell is not None:
                 cell = cells[active_unloading_cell]
                 if cell.phase == 'Unloading':
-                    unload_amount = min(cell.soil_volume, daily_unload_rate)
+                    unload_amount = min(cell.soil_volume, today_unload_rate)
                     if unload_amount > 0:
                         cell.soil_volume -= unload_amount
+                        equipment_used += unload_amount  # Track equipment usage
                     if cell.soil_volume <= 0:
                         # Cell is now IMMEDIATELY empty and available for loading today
                         cell.phase = 'Empty'
@@ -454,9 +481,14 @@ def simulate_for_idle_days(num_cells, cell_volume, daily_volume_cy, daily_equipm
         
         # ============================================================
         # LOADING - now any just-emptied cells are available
+        # On non-receive days, loading gets remaining equipment after unloading
         # ============================================================
         if can_load:
-            remaining_load_capacity = daily_load_rate
+            if receiving_today:
+                remaining_load_capacity = today_load_rate
+            else:
+                # Non-receive day: load from stockpile with equipment not used for unloading
+                remaining_load_capacity = max(0, daily_equipment_capacity - equipment_used)
             
             while remaining_load_capacity > 0 and soil_waiting > 0:
                 # Find or assign active loading cell
@@ -558,9 +590,8 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
     cell_volume = config['cell_volume_cy']
     num_cells = int(config['num_cells'])
     
-    # Calculate daily rates
-    daily_load_rate = daily_volume_cy  # Loading matches incoming
-    daily_unload_rate = daily_equipment_capacity - daily_volume_cy  # Unloading gets the rest
+    # Base load rate (target: match incoming)
+    daily_load_rate = daily_volume_cy
     
     # Initialize cell tracking
     class CellState:
@@ -613,7 +644,8 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
         # Soil arrives on delivery days (may be different from load work days)
         # ============================================================
         daily_delivered = 0
-        if is_valid_work_day(current_date, 'receive', weekend_params):
+        receiving_today = is_valid_work_day(current_date, 'receive', weekend_params)
+        if receiving_today:
             soil_waiting += daily_volume_cy
             daily_delivered = daily_volume_cy
         
@@ -628,12 +660,33 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
         can_load = is_valid_work_day(current_date, 'load', weekend_params)
         can_unload = is_valid_work_day(current_date, 'unload', weekend_params)
         
+        # Dynamic equipment allocation:
+        # - If receiving soil today: loading gets priority (must keep up with trucks)
+        # - If NOT receiving: prioritize UNLOADING to free cells, then load from stockpile
+        if receiving_today:
+            # Must keep up with incoming - loading gets priority
+            today_load_rate = min(daily_volume_cy, daily_equipment_capacity)
+            today_unload_rate = max(0, daily_equipment_capacity - today_load_rate)
+        else:
+            # No new soil arriving - UNLOAD FIRST to free cells for future use
+            if can_unload:
+                today_unload_rate = daily_equipment_capacity
+            else:
+                today_unload_rate = 0
+            
+            if can_load:
+                today_load_rate = daily_equipment_capacity  # Will be reduced by actual unload amount
+            else:
+                today_load_rate = 0
+        
+        equipment_used = 0  # Track for non-receive days
+        
         # ============================================================
         # UNLOADING FIRST - so cells become available for loading
         # ============================================================
         cell_unload_amounts = {}  # Track which cell unloaded and how much
         
-        if can_unload:
+        if can_unload and today_unload_rate > 0:
             # Find or assign active unloading cell (lowest flip number ready)
             if active_unloading_cell is None:
                 ready_cells = [(cell_num, cells[cell_num]) for cell_num in range(1, num_cells + 1) 
@@ -643,16 +696,17 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
                     active_unloading_cell = ready_cells[0][0]
                     cells[active_unloading_cell].phase = 'Unloading'
             
-            # Unload at surplus rate
+            # Unload at today's available rate
             if active_unloading_cell is not None:
                 cell = cells[active_unloading_cell]
                 if cell.phase == 'Unloading':
-                    unload_amount = min(cell.soil_volume, daily_unload_rate)
+                    unload_amount = min(cell.soil_volume, today_unload_rate)
                     if unload_amount > 0:
                         cell.soil_volume -= unload_amount
                         daily_soil_out = unload_amount
                         total_soil_unloaded += unload_amount
                         cell_unload_amounts[active_unloading_cell] = unload_amount
+                        equipment_used += unload_amount  # Track equipment usage
                     if cell.soil_volume <= 0:
                         # Cell is now IMMEDIATELY empty and available for loading today
                         cell.phase = 'Empty'
@@ -661,11 +715,16 @@ def simulate_facility_schedule(config, daily_volume_cy, daily_equipment_capacity
         
         # ============================================================
         # LOADING - now any just-emptied cells are available
+        # On non-receive days, loading gets remaining equipment after unloading
         # ============================================================
         cell_load_amounts = {}  # Track how much each cell loaded today
         
         if can_load:
-            remaining_load_capacity = daily_load_rate  # Can load up to incoming rate
+            if receiving_today:
+                remaining_load_capacity = today_load_rate
+            else:
+                # Non-receive day: load from stockpile with equipment not used for unloading
+                remaining_load_capacity = max(0, daily_equipment_capacity - equipment_used)
             
             while remaining_load_capacity > 0 and soil_waiting > 0:
                 # Find or assign active loading cell
