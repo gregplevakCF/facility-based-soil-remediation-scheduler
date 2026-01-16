@@ -6,11 +6,8 @@ Determines optimal treatment cell configuration for continuous daily soil volume
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import plotly.express as px
-import plotly.graph_objects as go
 from io import BytesIO
 import math
-import numpy as np
 
 # ============================================================================
 # Configuration and Constants
@@ -1003,117 +1000,17 @@ def main():
                         help="Fewest idle days found"
                     )
             
-            # Configuration Matrix
-            st.subheader("🔍 Configuration Matrix")
-            st.markdown("""
-            **Configurations sorted by priority:**
-            1. Zero idle days (continuous operation)
-            2. Fewest cells
-            3. Smallest cell size
-            """)
-            
-            # Prepare display dataframe
-            display_df = results_df.copy()
-            
-            # Format columns for display
-            display_df['Cell Size (CY)'] = display_df['cell_volume_cy'].astype(int)
-            display_df['Cells'] = display_df['num_cells'].astype(int)
-            display_df['Total Capacity (CY)'] = display_df['total_capacity_cy'].astype(int)
-            display_df['Load Days'] = display_df['load_days'].astype(int)
-            display_df['Cycle Days'] = display_df['cycle_days'].astype(int)
-            display_df['Idle Days'] = display_df['idle_days'].astype(int)
-            display_df['Max Daily (CY)'] = display_df['max_daily_volume'].astype(int)
-            display_df['Buffer %'] = display_df['buffer_pct'].round(0).astype(int)
-            
-            # Display columns
-            display_cols = [
-                'Cell Size (CY)', 'Cells', 'Total Capacity (CY)', 
-                'Load Days', 'Cycle Days', 'Idle Days', 'Max Daily (CY)', 'Buffer %'
-            ]
-            
-            # Color coding for idle days and buffer
-            def color_idle_days(val):
-                """Color code idle days - green for zero, red for any"""
-                if val == 0:
-                    return 'background-color: #90EE90'  # Light green
-                else:
-                    return 'background-color: #FFB6C1'  # Light red
-            
-            def color_buffer(val):
-                """Color code buffer % - green for excellent (≥50%), yellow for adequate (<50%)"""
-                if val >= 50:
-                    return 'background-color: #90EE90'  # Light green - excellent headroom
-                else:
-                    return 'background-color: #FFFFE0'  # Light yellow - adequate headroom
-            
-            # Apply styling
-            styled_df = display_df[display_cols].style.applymap(
-                color_idle_days,
-                subset=['Idle Days']
-            ).applymap(
-                color_buffer,
-                subset=['Buffer %']
-            )
-            
-            # Display the table with row selection
-            st.markdown("**Click a row to select that configuration:**")
-            
-            # Use data_editor for selection capability
-            selection_df = display_df[display_cols].copy()
-            selection_df.insert(0, 'Select', False)
-            
-            edited_df = st.data_editor(
-                selection_df,
-                use_container_width=True,
-                hide_index=True,
-                height=min(400, len(display_df) * 35 + 38),
-                column_config={
-                    "Select": st.column_config.CheckboxColumn(
-                        "✓",
-                        help="Select this configuration",
-                        default=False,
-                        width="small"
-                    ),
-                    "Idle Days": st.column_config.NumberColumn(
-                        "Idle Days",
-                        help="Days where soil arrives but can't be loaded (0 = continuous operation)"
-                    ),
-                    "Max Daily (CY)": st.column_config.NumberColumn(
-                        "Max Daily (CY)",
-                        help="Maximum daily volume this config can handle"
-                    ),
-                    "Buffer %": st.column_config.NumberColumn(
-                        "Buffer %",
-                        help="Headroom above planned volume (green ≥50% excellent, yellow <50% adequate)"
-                    )
-                },
-                disabled=display_cols,  # Only allow editing the Select column
-                key="config_matrix"
-            )
-            
-            # Find selected row from checkbox
-            selected_rows = edited_df[edited_df['Select'] == True].index.tolist()
-            
-            # Default to first row if nothing selected, or use the selected row
-            if selected_rows:
-                default_index = selected_rows[0]
-            elif 'selected_config_index' in st.session_state:
-                default_index = st.session_state.selected_config_index
-            else:
-                default_index = 0
-            
-            # Row selection for schedule generation
-            st.markdown("---")
-            st.subheader("📋 Selected Configuration")
+            # Configuration Selection (simplified)
+            st.subheader("📋 Select Configuration")
             
             col1, col2 = st.columns([3, 1])
             
             with col1:
                 selected_index = st.selectbox(
-                    "Configuration (or click checkbox above):",
+                    "Choose configuration:",
                     options=range(len(results_df)),
-                    format_func=lambda x: f"Config {x+1}: {int(results_df.iloc[x]['num_cells'])} × {int(results_df.iloc[x]['cell_volume_cy'])} CY ({int(results_df.iloc[x]['idle_days'])} idle days, max {int(results_df.iloc[x]['max_daily_volume'])} CY/day)",
-                    index=default_index,
+                    format_func=lambda x: f"{int(results_df.iloc[x]['num_cells'])} × {int(results_df.iloc[x]['cell_volume_cy'])} CY (max {int(results_df.iloc[x]['max_daily_volume'])} CY/day)",
+                    index=0,
                     key="config_selector"
                 )
                 st.session_state.selected_config_index = selected_index
@@ -1128,7 +1025,6 @@ def main():
             # Display selected configuration details
             selected_config = results_df.iloc[selected_index]
             
-            st.markdown("**Selected Configuration Details:**")
             detail_col1, detail_col2, detail_col3, detail_col4 = st.columns(4)
             
             with detail_col1:
@@ -1140,11 +1036,9 @@ def main():
                 st.metric("Full Cycle", f"{selected_config['cycle_days']:.0f} days")
             
             with detail_col3:
-                st.metric("Max Daily Volume", f"{int(selected_config['max_daily_volume'])} CY/day",
-                         help="Maximum soil volume this config can receive daily while maintaining continuous operation")
+                st.metric("Max Daily Volume", f"{int(selected_config['max_daily_volume'])} CY/day")
                 buffer_pct = selected_config['buffer_pct']
-                st.metric("Buffer Capacity", f"+{buffer_pct:.0f}%",
-                         help="Headroom above your planned daily volume for surge capacity")
+                st.metric("Buffer Capacity", f"+{buffer_pct:.0f}%")
             
             with detail_col4:
                 st.metric("Idle Days", f"{int(selected_config['idle_days'])}")
@@ -1152,180 +1046,10 @@ def main():
                     st.success("✅ Continuous Operation")
                 else:
                     st.warning(f"⚠️ Will turn away work")
-                
             
-            # Cycle Time Breakdown for Selected Config
-            st.markdown("**Cycle Time Breakdown (Selected Configuration):**")
-            cycle_data = {
-                'Phase': ['Loading', 'Rip', 'Treatment', 'Drying', 'Unloading', 'TOTAL'],
-                'Calendar Days': [
-                    selected_config['cycle_breakdown']['load_calendar_days'],
-                    selected_config['cycle_breakdown']['rip_calendar_days'],
-                    selected_config['cycle_breakdown']['treat_calendar_days'],
-                    selected_config['cycle_breakdown']['dry_calendar_days'],
-                    selected_config['cycle_breakdown']['unload_calendar_days'],
-                    selected_config['cycle_days']
-                ]
-            }
-            st.dataframe(pd.DataFrame(cycle_data), hide_index=True, use_container_width=True)
-            
-            # Visualizations
-            st.subheader("📊 Configuration Comparisons")
-            
-            # Create tabs for different visualizations
-            tab1, tab2, tab3 = st.tabs(["Cell Size vs Cells", "Idle Days Analysis", "Cycle Time"])
-            
-            with tab1:
-                fig1 = px.scatter(
-                    results_df,
-                    x='cell_volume_cy',
-                    y='num_cells',
-                    color='idle_days',
-                    hover_data=['cycle_days', 'total_capacity_cy', 'idle_days'],
-                    labels={
-                        'cell_volume_cy': 'Cell Size (CY)',
-                        'num_cells': 'Number of Cells',
-                        'idle_days': 'Idle Days',
-                        'total_capacity_cy': 'Total Capacity'
-                    },
-                    title='Cell Size vs Number of Cells (color = Idle Days)',
-                    color_continuous_scale='RdYlGn_r'  # Red=bad (high idle), Green=good (zero)
-                )
-                fig1.update_traces(marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
-                st.plotly_chart(fig1, use_container_width=True)
-            
-            with tab2:
-                # Filter to show configs with various idle day counts
-                fig2 = px.bar(
-                    results_df.groupby('num_cells').agg({
-                        'idle_days': 'min',
-                        'cell_volume_cy': 'min'
-                    }).reset_index(),
-                    x='num_cells',
-                    y='idle_days',
-                    color='idle_days',
-                    labels={
-                        'num_cells': 'Number of Cells',
-                        'idle_days': 'Minimum Idle Days',
-                    },
-                    title='Minimum Idle Days by Cell Count',
-                    color_continuous_scale='RdYlGn_r'
-                )
-                fig2.add_hline(y=0, line_dash="dash", line_color="green", annotation_text="Zero Idle = Continuous Operation")
-                st.plotly_chart(fig2, use_container_width=True)
-                
-                st.info("""
-                **Understanding Idle Days:**
-                - **0 idle days**: ✅ Continuous operation - never turn away work
-                - **1+ idle days**: ⚠️ Some days you can't accept incoming soil
-                
-                Goal: Find the fewest cells that achieve zero idle days.
-                """)
-            
-            with tab3:
-                # Cycle time breakdown for selected config
-                cycle_breakdown = {
-                    'Phase': ['Load', 'Rip', 'Treat', 'Dry', 'Unload'],
-                    'Days': [
-                        selected_config['cycle_breakdown']['load_calendar_days'],
-                        selected_config['cycle_breakdown']['rip_calendar_days'],
-                        selected_config['cycle_breakdown']['treat_calendar_days'],
-                        selected_config['cycle_breakdown']['dry_calendar_days'],
-                        selected_config['cycle_breakdown']['unload_calendar_days']
-                    ]
-                }
-                fig4 = px.bar(
-                    cycle_breakdown,
-                    x='Phase',
-                    y='Days',
-                    title='Cycle Time Breakdown (Selected Configuration)',
-                    labels={'Days': 'Calendar Days'},
-                    color='Phase',
-                    color_discrete_sequence=px.colors.qualitative.Set2
-                )
-                st.plotly_chart(fig4, use_container_width=True)
-            
-            # Export options
-            st.subheader("💾 Export Results")
-            
-            col1, col2 = st.columns(2)
-            
-            # Prepare export data
-            export_df = results_df.copy()
-            export_df = export_df.round(2)
-            
-            # Add summary sheet
-            summary_data = {
-                'Parameter': [
-                    'Daily Incoming Volume (CY)',
-                    'Daily Equipment Capacity (CY)',
-                    'Rip Duration (days)',
-                    'Treatment Duration (days)',
-                    'Drying Duration (days)',
-                    '',
-                    'SELECTED CONFIGURATION',
-                    'Cell Size (CY)',
-                    'Number of Cells',
-                    'Total Facility Capacity (CY)',
-                    'Cycle Time (days)',
-                    'Idle Days',
-                    'Max Daily Volume (CY/day)',
-                    'Buffer Capacity (%)'
-                ],
-                'Value': [
-                    daily_volume,
-                    daily_equipment_capacity,
-                    rip_days,
-                    treat_days,
-                    dry_days,
-                    '',
-                    '',
-                    selected_config['cell_volume_cy'],
-                    selected_config['num_cells'],
-                    selected_config['total_capacity_cy'],
-                    selected_config['cycle_days'],
-                    selected_config['idle_days'],
-                    selected_config['max_daily_volume'],
-                    f"{selected_config['buffer_pct']:.1f}"
-                ]
-            }
-            summary_df = pd.DataFrame(summary_data)
-            
-            # Create Excel file
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                summary_df.to_excel(writer, sheet_name='Summary', index=False)
-                export_df.to_excel(writer, sheet_name='All_Configurations', index=False)
-            
-            output.seek(0)
-            
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            excel_filename = f"facility_optimizer_{timestamp}.xlsx"
-            
-            with col1:
-                st.download_button(
-                    label="📥 Download Configuration Analysis",
-                    data=output,
-                    file_name=excel_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            
-            with col2:
-                csv_data = export_df.to_csv(index=False)
-                st.download_button(
-                    label="📄 Download CSV",
-                    data=csv_data,
-                    file_name=f"configurations_{timestamp}.csv",
-                    mime="text/csv"
-                )
-            
-            # Generate Treatment Schedule
+            # Auto-generate and display schedule
             st.markdown("---")
-            st.subheader("📅 Generate Treatment Schedule")
-            st.markdown("""
-            Generate a detailed day-by-day schedule showing how each treatment cell will operate
-            over time based on the selected configuration.
-            """)
+            st.subheader("📅 Treatment Schedule")
             
             col1, col2 = st.columns([2, 1])
             with col1:
@@ -1335,193 +1059,248 @@ def main():
                     help="First day of facility operations",
                     key="schedule_start_date_input"
                 )
+            with col2:
+                schedule_days = st.number_input(
+                    "Days to Schedule",
+                    min_value=30,
+                    max_value=365,
+                    value=90,
+                    step=30,
+                    help="Number of days to simulate",
+                    key="schedule_days_number"
+                )
+            
+            # Generate schedule
+            schedule_start = datetime.combine(schedule_start_date, datetime.min.time())
+            
+            schedule_df = simulate_facility_schedule(
+                selected_config,
+                daily_volume,
+                daily_equipment_capacity,
+                phase_params,
+                weekend_params,
+                schedule_start,
+                int(schedule_days)
+            )
+            
+            # Store in session state for export
+            st.session_state.schedule_df = schedule_df
+            st.session_state.schedule_generated = True
+            st.session_state.schedule_start = schedule_start
+            
+            # Create display columns
+            display_cols = ['Date', 'DayName']
+            for i in range(1, int(selected_config['num_cells']) + 1):
+                display_cols.append(f'Cell_{i}_Phase')
+            display_cols.extend(['SoilIn', 'SoilOut', 'SoilWaiting'])
+            
+            # Prepare display dataframe
+            display_schedule = schedule_df[display_cols].copy()
+            display_schedule['Date'] = display_schedule['Date'].dt.strftime('%m/%d/%Y')
+            
+            # Rename columns for cleaner display
+            rename_map = {'DayName': 'Day', 'SoilIn': 'In', 'SoilOut': 'Out', 'SoilWaiting': 'Wait'}
+            for i in range(1, int(selected_config['num_cells']) + 1):
+                rename_map[f'Cell_{i}_Phase'] = f'Cell {i}'
+            display_schedule = display_schedule.rename(columns=rename_map)
+            
+            # Define phase colors (matching Excel export)
+            phase_colors = {
+                'Load': '#8ED973',    # Green
+                'Rip': '#83CCEB',     # Light blue
+                'Treat': '#FFC000',   # Gold/Orange
+                'Dry': '#F2CEEF',     # Pink
+                'Unload': '#00B0F0',  # Bright blue
+            }
+            
+            def style_schedule(df):
+                """Apply colors to schedule dataframe"""
+                styles = pd.DataFrame('', index=df.index, columns=df.columns)
                 
-                with col2:
-                    schedule_days = st.number_input(
-                        "Days to Schedule",
-                        min_value=30,
-                        max_value=365,
-                        value=90,
-                        step=30,
-                        help="Number of days to simulate",
-                        key="schedule_days_number"
-                    )
+                # Get cell columns
+                cell_cols = [col for col in df.columns if col.startswith('Cell')]
                 
-                if st.button("📊 Generate Detailed Schedule", type="primary", key="generate_schedule_btn"):
-                    try:
-                        with st.spinner("Generating detailed treatment schedule..."):
-                            # Convert date to datetime
-                            schedule_start = datetime.combine(schedule_start_date, datetime.min.time())
-                            
-                            # Generate schedule
-                            schedule_df = simulate_facility_schedule(
-                                selected_config,
-                                daily_volume,
-                                daily_equipment_capacity,
-                                phase_params,
-                                weekend_params,
-                                schedule_start,
-                                int(schedule_days)
-                            )
-                            
-                            # Store in session state
-                            st.session_state.schedule_df = schedule_df
-                            st.session_state.schedule_generated = True
-                            st.session_state.schedule_start = schedule_start
-                    except Exception as e:
-                        st.error(f"Error generating schedule: {str(e)}")
-                        st.error("Please try again or contact support if the issue persists.")
+                for idx in df.index:
+                    # Check if Sunday for row highlighting
+                    is_sunday = df.loc[idx, 'Day'] == 'Sunday'
+                    
+                    for col in df.columns:
+                        if col in cell_cols:
+                            # Color based on phase
+                            val = str(df.loc[idx, col]) if pd.notna(df.loc[idx, col]) else ''
+                            for phase, color in phase_colors.items():
+                                if phase in val:
+                                    styles.loc[idx, col] = f'background-color: {color}; text-align: center'
+                                    break
+                            else:
+                                if is_sunday:
+                                    styles.loc[idx, col] = 'background-color: #FFFF00; text-align: center'
+                                else:
+                                    styles.loc[idx, col] = 'text-align: center'
+                        elif is_sunday and col not in ['Date']:
+                            styles.loc[idx, col] = 'background-color: #FFFF00'
                 
-                # Display schedule if it has been generated
-                if st.session_state.schedule_generated and st.session_state.schedule_df is not None:
-                    schedule_df = st.session_state.schedule_df
-                    schedule_start = st.session_state.schedule_start
-                    selected_config = results_df.iloc[st.session_state.selected_config_index]
+                return styles
+            
+            # Apply styling
+            styled_schedule = display_schedule.style.apply(lambda x: style_schedule(display_schedule), axis=None)
+            
+            # Display the schedule
+            st.dataframe(
+                styled_schedule,
+                use_container_width=True,
+                hide_index=True,
+                height=600
+            )
+            
+            # Legend
+            st.markdown("**Legend:**")
+            legend_cols = st.columns(5)
+            with legend_cols[0]:
+                st.markdown('<div style="background-color: #8ED973; padding: 5px; text-align: center; border-radius: 3px;">Load</div>', unsafe_allow_html=True)
+            with legend_cols[1]:
+                st.markdown('<div style="background-color: #83CCEB; padding: 5px; text-align: center; border-radius: 3px;">Rip</div>', unsafe_allow_html=True)
+            with legend_cols[2]:
+                st.markdown('<div style="background-color: #FFC000; padding: 5px; text-align: center; border-radius: 3px;">Treat</div>', unsafe_allow_html=True)
+            with legend_cols[3]:
+                st.markdown('<div style="background-color: #F2CEEF; padding: 5px; text-align: center; border-radius: 3px;">Dry</div>', unsafe_allow_html=True)
+            with legend_cols[4]:
+                st.markdown('<div style="background-color: #00B0F0; padding: 5px; text-align: center; border-radius: 3px;">Unload</div>', unsafe_allow_html=True)
+            
+            # Export options
+            st.markdown("---")
+            st.subheader("💾 Export Schedule")
+            
+            # Create formatted Excel export
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_schedule = BytesIO()
+            with pd.ExcelWriter(output_schedule, engine='openpyxl') as writer:
+                # Write schedule
+                schedule_export = schedule_df.copy()
+                schedule_export.to_excel(writer, sheet_name='Schedule', index=False)
+                
+                # Write summary
+                schedule_summary = {
+                    'Metric': [
+                        'Start Date',
+                        'Days Simulated',
+                        'Cell Size (CY)',
+                        'Number of Cells',
+                        'Daily Incoming Volume (CY)',
+                        'Daily Equipment Capacity (CY)',
+                        'Total Soil Loaded (CY)',
+                        'Total Soil Unloaded (CY)',
+                        'Soil Waiting (End)',
+                    ],
+                    'Value': [
+                        schedule_start.strftime('%Y-%m-%d'),
+                        len(schedule_df),
+                        selected_config['cell_volume_cy'],
+                        int(selected_config['num_cells']),
+                        daily_volume,
+                        daily_equipment_capacity,
+                        schedule_df['CumSoilIn'].iloc[-1],
+                        schedule_df['CumSoilOut'].iloc[-1],
+                        schedule_df['SoilWaiting'].iloc[-1],
+                    ]
+                }
+                pd.DataFrame(schedule_summary).to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Apply formatting to Schedule sheet
+                from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
+                from openpyxl.utils import get_column_letter
+                
+                workbook = writer.book
+                worksheet = writer.sheets['Schedule']
+                
+                # Define colors matching display
+                excel_phase_colors = {
+                    'Load': '#8ED973',
+                    'Rip': '#83CCEB',
+                    'Treat': '#FFC000',
+                    'Dry': '#F2CEEF',
+                    'Unload': '#00B0F0',
+                    'ReadyToUnload': '#00B0F0',
+                    'Empty': '#FFFFFF'
+                }
+                
+                sunday_fill = PatternFill(start_color='FFFFFF00', end_color='FFFFFF00', fill_type='solid')
+                
+                thin_border = Border(
+                    left=Side(style='thin', color='000000'),
+                    right=Side(style='thin', color='000000'),
+                    top=Side(style='thin', color='000000'),
+                    bottom=Side(style='thin', color='000000')
+                )
+                aptos_font = Font(name='Aptos Narrow', size=10)
+                aptos_font_bold = Font(name='Aptos Narrow', size=10, bold=True)
+                center_aligned = Alignment(horizontal='center', vertical='center')
+                
+                # Find columns
+                phase_columns = []
+                date_column_idx = None
+                dayname_column_idx = None
+                
+                for col_idx, col_name in enumerate(schedule_df.columns, start=1):
+                    if 'Phase' in col_name:
+                        phase_columns.append((col_idx, col_name))
+                    if col_name == 'Date':
+                        date_column_idx = col_idx
+                    if col_name == 'DayName':
+                        dayname_column_idx = col_idx
+                
+                # Apply formatting
+                for row_idx in range(1, len(schedule_df) + 2):
+                    is_sunday = False
                     
-                    # Display preview
-                    st.success("✅ Schedule Generated!")
-                    st.markdown("**Schedule Preview** (first 14 days)")
+                    if row_idx > 1:
+                        if dayname_column_idx:
+                            day_name_cell = worksheet.cell(row=row_idx, column=dayname_column_idx)
+                            is_sunday = str(day_name_cell.value) == 'Sunday'
                     
-                    # Create display version
-                    display_cols = ['Date', 'DayName']
-                    for i in range(1, int(selected_config['num_cells']) + 1):
-                        display_cols.append(f'Cell_{i}_Phase')
-                    display_cols.extend(['SoilIn', 'SoilOut', 'SoilWaiting', 'CumSoilIn', 'CumSoilOut'])
-                    
-                    preview_df = schedule_df[display_cols].head(14).copy()
-                    preview_df['Date'] = preview_df['Date'].dt.strftime('%Y-%m-%d')
-                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
-                    
-                    # Create formatted Excel export
-                    st.markdown("**Export Formatted Schedule**")
-                    
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    output_schedule = BytesIO()
-                    with pd.ExcelWriter(output_schedule, engine='openpyxl') as writer:
-                            # Write schedule
-                            schedule_export = schedule_df.copy()
-                            schedule_export.to_excel(writer, sheet_name='Schedule', index=False)
-                            
-                            # Write summary
-                            schedule_summary = {
-                                'Metric': [
-                                    'Start Date',
-                                    'Days Simulated',
-                                    'Cell Size (CY)',
-                                    'Number of Cells',
-                                    'Daily Incoming Volume (CY)',
-                                    'Total Soil Loaded (CY)',
-                                    'Total Soil Unloaded (CY)',
-                                    'Soil Waiting (End)',
-                                ],
-                                'Value': [
-                                    schedule_start.strftime('%Y-%m-%d'),
-                                    len(schedule_df),
-                                    selected_config['cell_volume_cy'],
-                                    int(selected_config['num_cells']),
-                                    daily_volume,
-                                    schedule_df['CumSoilIn'].iloc[-1],
-                                    schedule_df['CumSoilOut'].iloc[-1],
-                                    schedule_df['SoilWaiting'].iloc[-1],
-                                ]
-                            }
-                            pd.DataFrame(schedule_summary).to_excel(writer, sheet_name='Summary', index=False)
-                            
-                            # Apply formatting to Schedule sheet
-                            from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
-                            from openpyxl.utils import get_column_letter
-                            
-                            workbook = writer.book
-                            worksheet = writer.sheets['Schedule']
-                            
-                            # Define colors matching original
-                            phase_colors = {
-                                'Load': '#8ED973',
-                                'Rip': '#83CCEB',
-                                'Treat': '#FFC000',
-                                'Dry': '#F2CEEF',
-                                'Unload': '#00B0F0',
-                                'ReadyToUnload': '#00B0F0',
-                                'Empty': '#FFFFFF'
-                            }
-                            
-                            sunday_fill = PatternFill(start_color='FFFFFF00', end_color='FFFFFF00', fill_type='solid')
-                            
-                            thin_border = Border(
-                                left=Side(style='thin', color='000000'),
-                                right=Side(style='thin', color='000000'),
-                                top=Side(style='thin', color='000000'),
-                                bottom=Side(style='thin', color='000000')
-                            )
-                            aptos_font = Font(name='Aptos Narrow', size=10)
-                            aptos_font_bold = Font(name='Aptos Narrow', size=10, bold=True)
-                            center_aligned = Alignment(horizontal='center', vertical='center')
-                            
-                            # Find columns
-                            phase_columns = []
-                            date_column_idx = None
-                            dayname_column_idx = None
-                            
-                            for col_idx, col_name in enumerate(schedule_df.columns, start=1):
-                                if 'Phase' in col_name:
-                                    phase_columns.append((col_idx, col_name))
-                                if col_name == 'Date':
-                                    date_column_idx = col_idx
-                                if col_name == 'DayName':
-                                    dayname_column_idx = col_idx
-                            
-                            # Apply formatting
-                            for row_idx in range(1, len(schedule_df) + 2):
-                                is_sunday = False
-                                
-                                if row_idx > 1:
-                                    if dayname_column_idx:
-                                        day_name_cell = worksheet.cell(row=row_idx, column=dayname_column_idx)
-                                        is_sunday = str(day_name_cell.value) == 'Sunday'
-                                
-                                for col_idx in range(1, len(schedule_df.columns) + 1):
-                                    cell = worksheet.cell(row=row_idx, column=col_idx)
-                                    is_phase_column = any(col_idx == phase_col_idx for phase_col_idx, _ in phase_columns)
+                    for col_idx in range(1, len(schedule_df.columns) + 1):
+                        cell = worksheet.cell(row=row_idx, column=col_idx)
+                        is_phase_column = any(col_idx == phase_col_idx for phase_col_idx, _ in phase_columns)
+                        
+                        cell.border = thin_border
+                        cell.font = aptos_font_bold if row_idx == 1 else aptos_font
+                        
+                        if col_idx == date_column_idx and row_idx > 1:
+                            cell.number_format = 'M/D/YYYY'
+                        
+                        if is_sunday and not is_phase_column and row_idx > 1 and col_idx != date_column_idx:
+                            cell.fill = sunday_fill
+                        
+                        if row_idx > 1:
+                            for phase_col_idx, phase_col_name in phase_columns:
+                                if col_idx == phase_col_idx:
+                                    cell.alignment = center_aligned
+                                    phase_value = str(cell.value) if cell.value else ''
                                     
-                                    cell.border = thin_border
-                                    cell.font = aptos_font_bold if row_idx == 1 else aptos_font
-                                    
-                                    if col_idx == date_column_idx and row_idx > 1:
-                                        cell.number_format = 'M/D/YYYY'
-                                    
-                                    if is_sunday and not is_phase_column and row_idx > 1 and col_idx != date_column_idx:
-                                        cell.fill = sunday_fill
-                                    
-                                    if row_idx > 1:
-                                        for phase_col_idx, phase_col_name in phase_columns:
-                                            if col_idx == phase_col_idx:
-                                                cell.alignment = center_aligned
-                                                phase_value = str(cell.value) if cell.value else ''
-                                                
-                                                for phase_name, color in phase_colors.items():
-                                                    if phase_name in phase_value:
-                                                        hex_color = color.lstrip('#')
-                                                        openpyxl_color = 'FF' + hex_color
-                                                        cell.fill = PatternFill(start_color=openpyxl_color,
-                                                                              end_color=openpyxl_color,
-                                                                              fill_type='solid')
-                                                        break
-                            
-                            # Auto-adjust column widths
-                            for column_cells in worksheet.columns:
-                                length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-                                worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 2, 50)
-                    
-                    output_schedule.seek(0)
-                    
-                    schedule_filename = f"treatment_schedule_{timestamp}.xlsx"
-                    st.download_button(
-                        label="📥 Download Formatted Schedule",
-                        data=output_schedule,
-                        file_name=schedule_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_schedule"
-                    )
+                                    for phase_name, color in excel_phase_colors.items():
+                                        if phase_name in phase_value:
+                                            hex_color = color.lstrip('#')
+                                            openpyxl_color = 'FF' + hex_color
+                                            cell.fill = PatternFill(start_color=openpyxl_color,
+                                                                  end_color=openpyxl_color,
+                                                                  fill_type='solid')
+                                            break
+                
+                # Auto-adjust column widths
+                for column_cells in worksheet.columns:
+                    length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+                    worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 2, 50)
+            
+            output_schedule.seek(0)
+            
+            schedule_filename = f"treatment_schedule_{timestamp}.xlsx"
+            st.download_button(
+                label="📥 Download Formatted Schedule (Excel)",
+                data=output_schedule,
+                file_name=schedule_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_schedule"
+            )
     
     else:
         # Initial state - show instructions
@@ -1533,52 +1312,35 @@ def main():
         This optimizer helps you design a continuous-flow soil remediation facility by:
         
         1. **Analyzing Your Requirements**: Input your daily incoming soil volume and operational parameters
-        2. **Calculating Cycle Times**: Determines how long each treatment cell takes to complete a full cycle
-        3. **Finding Optimal Configurations**: Generates configurations prioritized by:
-           - **Zero idle days** (continuous operation - never turn away work)
-           - **Fewest cells** (minimize capital cost)
-           - **Smallest cell size** (if tied on cell count)
-        4. **Showing Capacity Limits**: Calculates the **maximum daily volume** each config can handle
-        5. **You Choose**: Select the configuration that best fits your needs
-        6. **Generating Schedules**: Creates detailed day-by-day treatment schedules
+        2. **Finding Viable Configurations**: Only shows configurations that can sustain your planned volume
+        3. **Simulating Operations**: Generates a detailed day-by-day schedule with color-coded phases
+        4. **You Choose**: Select the configuration that best fits your needs
         
         ### Key Features
         
-        - **Configuration Matrix**: Shows all options with idle days, max capacity, and buffer %
-        - **Continuous Operation Check**: Green = zero idle days, Red = will turn away work
-        - **Max Daily Volume**: The maximum CY/day each config can process continuously
-        - **Buffer Capacity**: Headroom above your planned volume for surge capacity
+        - **Smart Filtering**: Only shows configurations that work for your volume
+        - **Visual Schedule**: Color-coded treatment phases matching Excel export
+        - **Continuous Operation Check**: Ensures you never turn away work
         - **Weekend Scheduling**: Customizable work schedules by phase
-        - **Detailed Schedules**: Day-by-day tracking of all cells with color-coded phases
-        - **Excel Export**: Formatted reports with all configurations
+        - **Excel Export**: Formatted schedule with colored cells
         
-        ### Why Continuous Operation Matters
+        ### Phase Colors
         
-        **Turning away work = lost revenue.** The primary goal is:
-        - Always have a cell available when soil arrives
-        - Never have to tell a customer "come back later"
-        - Equipment stays productive (loading or unloading every work day)
-        
-        **Zero idle days** means continuous operation is guaranteed.
-        
-        ### Key Tradeoffs
-        
-        - **More cells** = Higher capital cost, BUT more surge capacity and reliability
-        - **Larger cells** = Fewer cells needed, BUT longer loading times and less flexibility
-        - **Max Daily Volume** = Shows how much headroom you have for growth
-        - **Buffer %** = Higher is better for handling volume spikes
+        - 🟢 **Load** (Green): Soil being loaded into cell
+        - 🔵 **Rip** (Light Blue): Ripping/mixing phase
+        - 🟡 **Treat** (Gold): Chemical treatment phase
+        - 🩷 **Dry** (Pink): Drying phase
+        - 🔷 **Unload** (Blue): Soil being removed from cell
         
         ### Workflow
         
-        1. Set your daily incoming volume
-        2. Configure equipment capacities
-        3. Set treatment phase durations
-        4. Define weekend working schedules
-        5. Run the analysis
-        6. **Review the configuration matrix** - prioritized by continuous operation
-        7. **Select your preferred configuration** - check the max capacity fits your needs
-        8. Generate detailed treatment schedule for selected config
-        9. Export results and schedules
+        1. Set your daily incoming volume and equipment capacity
+        2. Configure treatment phase durations
+        3. Define weekend working schedules
+        4. Click **Optimize Configuration**
+        5. Select your preferred cell configuration
+        6. Review the color-coded schedule
+        7. Download the formatted Excel schedule
         """)
 
 
